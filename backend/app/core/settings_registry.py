@@ -286,6 +286,20 @@ SETTING_SPECS: tuple[SettingSpec, ...] = (
         order=70,
     ),
     SettingSpec(
+        key="sync.proxy_url",
+        label="网络代理",
+        group="sync",
+        type="str",
+        default="",
+        description=(
+            "回补和行情请求使用的 HTTP/HTTPS 代理，例如 "
+            "http://127.0.0.1:7890；留空表示不使用。"
+            "腾讯与 AkShare 生效，BaoStock 的 TCP 连接不支持 HTTP 代理。"
+        ),
+        order=5,
+        tags=("network",),
+    ),
+    SettingSpec(
         key="sync.pipeline.market.enabled",
         label="行情管道",
         group="sync",

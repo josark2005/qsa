@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import uuid
 from dataclasses import dataclass
@@ -66,6 +67,37 @@ def _audit_value(spec: SettingSpec, value: Any) -> Any:
     return value
 
 
+_PROXY_KEYS = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+)
+_proxy_backup: dict[str, str | None] | None = None
+
+
+def _apply_proxy_url(proxy_url: str) -> None:
+    """Apply the configured proxy to requests/urllib-based clients."""
+    global _proxy_backup
+    proxy_url = proxy_url.strip()
+    if proxy_url:
+        if _proxy_backup is None:
+            _proxy_backup = {key: os.environ.get(key) for key in _PROXY_KEYS}
+        for key in _PROXY_KEYS:
+            os.environ[key] = proxy_url
+        return
+    if _proxy_backup is None:
+        return
+    for key, value in _proxy_backup.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+    _proxy_backup = None
+
+
 class SettingsService:
     def __init__(
         self,
@@ -105,6 +137,7 @@ class SettingsService:
             logger.error("invalid effective settings combination: %s", exc)
 
         snapshot = SettingsSnapshot(values, versions, utcnow())
+        _apply_proxy_url(str(values.get("sync.proxy_url", "")))
         with self._lock:
             self._snapshot = snapshot
         return snapshot

@@ -204,6 +204,16 @@ pnpm build
 
 更多系统设置可在管理端「系统设置」中热更新。
 
+### 网络代理
+
+回补可通过「系统设置 → 数据同步 → 网络代理」配置 `sync.proxy_url`，例如：
+
+```text
+http://127.0.0.1:7890
+```
+
+该配置会应用到腾讯和 AkShare 的 requests 请求；BaoStock 使用原始 TCP，不支持 HTTP 代理。Docker 容器内访问宿主机代理时，不能写 `127.0.0.1`，应使用 `host.docker.internal` 或宿主机网关地址。
+
 ## CI/CD
 
 工作流：`.github/workflows/ci.yml`

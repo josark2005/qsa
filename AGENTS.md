@@ -98,6 +98,7 @@ Linux/容器中使用 `.venv/bin/python`。Docker 相关命令在 Git Bash 下�
 - 腾讯负责快速价格/增量，BaoStock 负责沪深历史与完整字段，AkShare 补充北交所等；BaoStock 可能限流/登录失败。
 - 2017 年及以前数据已做 Tencent + Sina 多源核对并固化在月度归档；2018 年之后仍有部分标的稀疏，不要假设全量完整。
 - 先导入已有 SQLite 归档，再考虑重新下载；不要重复抓取已有数据。
+- 回补代理在系统设置 `sync.proxy_url` 配置；腾讯/AkShare 通过 requests 环境变量生效，BaoStock 原始 TCP 连接不走 HTTP 代理。
 - worker 使用 PostgreSQL advisory lock 和 `sync_requests` 队列（`FOR UPDATE SKIP LOCKED`）。重启 worker 前先检查是否有 running/queued 请求。
 - API 与 worker 都设计为单副本：QQ WebSocket、APScheduler 和队列消费者不能随意横向扩容。
 

@@ -99,6 +99,9 @@ jobs:
           cp .env.production.example .env.production
           cp .env.dev.example .env.dev
           docker compose --env-file .env.production -f docker-compose.prod.yml config > /dev/null
+          QSA_BACKEND_IMAGE=ghcr.io/example/qsa-backend:latest \
+            QSA_FRONTEND_IMAGE=ghcr.io/example/qsa-frontend:latest \
+            docker compose --env-file .env.production -f docker-compose.ghcr.yml config > /dev/null
           docker compose --env-file .env.dev -f docker-compose.dev.yml config > /dev/null
 
   build-images:
@@ -174,11 +177,11 @@ jobs:
             export QSA_BACKEND_IMAGE="${IMAGE_PREFIX}-backend:${IMAGE_TAG}"
             export QSA_FRONTEND_IMAGE="${IMAGE_PREFIX}-frontend:${IMAGE_TAG}"
 
-            docker compose --env-file .env.production -f docker-compose.prod.yml pull
-            docker compose --env-file .env.production -f docker-compose.prod.yml up -d --remove-orphans
+            docker compose --env-file .env.production -f docker-compose.ghcr.yml pull
+            docker compose --env-file .env.production -f docker-compose.ghcr.yml up -d --remove-orphans
 
             for attempt in $(seq 1 60); do
-              if docker compose --env-file .env.production -f docker-compose.prod.yml \
+              if docker compose --env-file .env.production -f docker-compose.ghcr.yml \
                 exec -T backend curl -fsS http://127.0.0.1:8000/api/health; then
                 break
               fi

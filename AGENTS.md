@@ -15,7 +15,7 @@ QSA 是一个前后端分离的条件筛选系统：FastAPI + PostgreSQL + Redis
 - `backend/migrations/versions/`：Alembic 迁移；以 `alembic heads` 为准，当前为 `b2d4e6f8a0c1`。
 - `frontend/src/pages/`：页面；`components/`：布局与业务组件；`lib/api.ts`、`lib/types.ts`：API 契约。
 - `data/history/`：1990 至今的月度 SQLite 归档；`data/reports/`：PDF 缓存；`data/bootstrap/`：部署用数据库 dump。
-- `docker-compose.yml`：本地开发用的 PostgreSQL/Redis；`docker-compose.dev.yml`：完整开发栈；`docker-compose.prod.yml`：生产栈。
+- `docker-compose.yml`：本地开发用的 PostgreSQL/Redis；`docker-compose.dev.yml`：完整开发栈；`docker-compose.prod.yml`：本地构建镜像的生产栈；`docker-compose.ghcr.yml`：直接拉取 GHCR 镜像的生产栈。
 
 ## 启动与验证
 
@@ -133,7 +133,7 @@ Linux/容器中使用 `.venv/bin/python`。Docker 相关命令在 Git Bash 下�
 - main 或 `v*` tag：推送 `ghcr.io/<owner>/<repo>-backend` 和 `-frontend` 镜像，标签为完整 commit SHA 与 `latest`。
 - 自动部署需要仓库变量 `ENABLE_DEPLOY=true`，以及 secrets：`DEPLOY_HOST`、`DEPLOY_USER`、`DEPLOY_SSH_KEY`、`DEPLOY_PATH`、`GHCR_PULL_USER`、`GHCR_PULL_TOKEN`；端口和 SSH fingerprint 可选。
 - 服务器 `DEPLOY_PATH` 需要已有仓库 clone、`.env.production`、`data/history` 和首次使用的 `data/bootstrap/qsa-full.dump`，且 `.env.production` 不纳入 git。
-- 部署脚本只执行 `git fetch/checkout`、`docker compose pull/up` 和健康检查，不会重建数据库或覆盖服务器环境变量。
+- 部署脚本只执行 `git fetch/checkout`、`docker compose pull/up` 和健康检查，不会重建数据库或覆盖服务器环境变量；部署使用 `docker-compose.ghcr.yml`。
 
 ## 常见坑
 

@@ -70,7 +70,7 @@ Linux/容器中使用 `.venv/bin/python`。Docker 相关命令在 Git Bash 下�
 - 时间统一使用 `Asia/Shanghai`；数据库时间使用 UTC。
 - 系统设置集中在 `app/core/settings_registry.py`。修改默认值要同时考虑数据库已有值；SettingsService 会热重载，敏感项必须保持掩码与审计脱敏。
 - 登录标识是用户名，不是邮箱。用户名 2–32 位，不含空格和 `@`；不开放注册，账号由管理员创建。
-- 密码最少 12 位（系统设置可调）；新增用户默认首次登录强制改密。
+- 密码最少 8 位（系统设置可调）；新增用户默认首次登录强制改密。
 - 用户删除/禁用/降级必须保留至少一个有效管理员。
 
 ## 筛选因子
@@ -133,7 +133,7 @@ Linux/容器中使用 `.venv/bin/python`。Docker 相关命令在 Git Bash 下�
 - PR：后端测试、前端 lint/build、compose 配置校验、镜像构建（不推送）。
 - main 或 `v*` tag：推送 `ghcr.io/josark2005/qsa-backend` 和 `ghcr.io/josark2005/qsa-frontend` 镜像，标签为完整 commit SHA 与 `latest`。
 - Actions 不负责部署；部署方在目标机器执行 `docker compose pull` 和 `docker compose up -d`。
-- 部署机需要 `.env.production`、`data/history` 和首次使用的 `data/bootstrap/qsa-full.dump`，`data` 目录不纳入 git。
+- 部署机需要 `.env`、`data/history` 和首次使用的 `data/bootstrap/qsa-full.dump`，`data` 目录不纳入 git。
 
 ## 常见坑
 

@@ -1,4 +1,5 @@
 import {
+  Activity,
   ChevronDown,
   Database,
   FileText,
@@ -87,6 +88,7 @@ export function AppLayout() {
         <nav className="flex-1 space-y-1 p-3">
           <SidebarLink to="/" label="概览" icon={LayoutDashboard} />
           <SidebarLink to="/screener" label="选股" icon={Search} />
+          <SidebarLink to="/trends" label="走势" icon={Activity} />
           <SidebarLink to="/reports" label="报表历史" icon={History} />
           {isAdmin ? (
             <>
@@ -138,6 +140,7 @@ export function AppLayout() {
         <nav className="flex gap-1 overflow-x-auto border-b bg-background px-3 py-2 md:hidden">
           <SidebarLink to="/" label="概览" icon={LayoutDashboard} />
           <SidebarLink to="/screener" label="选股" icon={Search} />
+          <SidebarLink to="/trends" label="走势" icon={Activity} />
           <SidebarLink to="/reports" label="报表历史" icon={History} />
           {isAdmin
             ? adminNav.map((item) => <SidebarLink key={item.to} {...item} />)

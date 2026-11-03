@@ -232,7 +232,7 @@ function CreateUserDialog({
               onChange={(event) => setPassword(event.target.value)}
             />
             <p className="text-xs text-muted-foreground">
-              手动指定的密码也要求至少 12 位。
+              手动指定的密码也要求至少 8 位。
             </p>
           </div>
           <DialogFooter>

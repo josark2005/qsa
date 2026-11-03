@@ -1,3 +1,10 @@
+# Usage:
+#   cp .env.example .env
+#   docker compose pull
+#   docker compose up -d
+#
+# Compose loads .env automatically.
+
 name: qsa
 
 x-backend-image: &backend-image "ghcr.io/josark2005/qsa-backend:${QSA_IMAGE_TAG:-latest}"
@@ -9,7 +16,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-qsa}
       POSTGRES_USER: ${POSTGRES_USER:-qsa}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.production}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     volumes:
       - ./data/postgres:/var/lib/postgresql
     shm_size: 256mb
@@ -37,7 +44,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-qsa}
       POSTGRES_USER: ${POSTGRES_USER:-qsa}
-      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.production}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     volumes:
       - ./data/bootstrap:/bootstrap:ro
     depends_on:
@@ -66,7 +73,7 @@ services:
     command: ["sh", "/app/docker/init.sh"]
     pull_policy: always
     env_file:
-      - .env.production
+      - .env
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-qsa}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-qsa}
       REDIS_URL: redis://redis:6379/0
@@ -87,7 +94,7 @@ services:
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
     pull_policy: always
     env_file:
-      - .env.production
+      - .env
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-qsa}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-qsa}
       REDIS_URL: redis://redis:6379/0
@@ -116,7 +123,7 @@ services:
     command: ["python", "-m", "app.worker"]
     pull_policy: always
     env_file:
-      - .env.production
+      - .env
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-qsa}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-qsa}
       REDIS_URL: redis://redis:6379/0

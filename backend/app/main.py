@@ -20,6 +20,7 @@ from app.api.routes import (
     admin_users,
     auth,
     health,
+    instruments,
     qq_bot,
     reports,
     screen,
@@ -140,6 +141,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.include_router(admin_audit.router, prefix=config.api_prefix)
     app.include_router(admin_sync.router, prefix=config.api_prefix)
     app.include_router(screen.router, prefix=config.api_prefix)
+    app.include_router(instruments.router, prefix=config.api_prefix)
     app.include_router(reports.router, prefix=config.api_prefix)
     app.include_router(reports.public_router, prefix=config.api_prefix)
     app.include_router(qq_bot.router, prefix=config.api_prefix)

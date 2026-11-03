@@ -8,6 +8,7 @@ import type {
   SettingUpdateItem,
   SettingsResponse,
   FactorListResponse,
+  InstrumentSearchResponse,
   QQBotStatus,
   QQSubscriptionListResponse,
   ReportHistoryResponse,
@@ -219,6 +220,18 @@ export const api = {
     return request<FactorListResponse>("/meta/factors")
   },
 
+  searchInstruments(q: string): Promise<InstrumentSearchResponse> {
+    return request<InstrumentSearchResponse>(
+      `/instruments/search${queryString({ q })}`,
+    )
+  },
+
+  instrumentTechnical(symbol: string): Promise<TechnicalResponse> {
+    return request<TechnicalResponse>(
+      `/instruments/${encodeURIComponent(symbol)}/technical`,
+    )
+  },
+
   runScreen(payload: ScreenRequest): Promise<ScreenResponse> {
     return request<ScreenResponse>("/screen", {
       method: "POST",
@@ -277,6 +290,12 @@ export const api = {
     return request<SyncRequest>("/admin/sync/requests", {
       method: "POST",
       body: payload,
+    })
+  },
+
+  cancelSyncRequest(requestId: number): Promise<SyncRequest> {
+    return request<SyncRequest>(`/admin/sync/requests/${requestId}/cancel`, {
+      method: "POST",
     })
   },
 

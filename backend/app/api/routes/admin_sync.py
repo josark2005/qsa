@@ -17,6 +17,7 @@ from app.api.deps import (
     verify_csrf,
 )
 from app.core.container import Container
+from app.core.db import utcnow
 from app.models.daily_bar import DailyBar
 from app.models.financial_report import FinancialReport
 from app.models.instrument import Instrument
@@ -138,6 +139,23 @@ def sync_status(
         if latest_financial
         else 0
     )
+    financial_totals = db.execute(
+        select(
+            func.min(FinancialReport.report_period),
+            func.max(FinancialReport.report_period),
+            func.count(),
+        ).select_from(FinancialReport)
+    ).one()
+    bar_totals = db.execute(
+        select(
+            func.min(DailyBar.trade_date),
+            func.max(DailyBar.trade_date),
+            func.count(),
+        )
+        .select_from(DailyBar)
+        .join(Instrument, Instrument.id == DailyBar.instrument_id)
+        .where(Instrument.asset_type.in_(("stock", "etf")))
+    ).one()
 
     holder_periods = db.execute(
         select(ShareholderCount.period_end, func.count())
@@ -167,12 +185,32 @@ def sync_status(
         if holder_choice
         else None
     )
+    holder_totals = db.execute(
+        select(
+            func.min(ShareholderCount.period_end),
+            func.max(ShareholderCount.period_end),
+            func.count(),
+        ).select_from(ShareholderCount)
+    ).one()
 
     today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
     latest_calendar = db.scalar(
         select(func.max(TradingCalendar.cal_date)).where(
             TradingCalendar.is_open.is_(True)
         )
+    )
+    earliest_calendar = db.scalar(
+        select(func.min(TradingCalendar.cal_date)).where(
+            TradingCalendar.is_open.is_(True)
+        )
+    )
+    calendar_open_days = int(
+        db.scalar(
+            select(func.count())
+            .select_from(TradingCalendar)
+            .where(TradingCalendar.is_open.is_(True))
+        )
+        or 0
     )
     latest_past_calendar = db.scalar(
         select(func.max(TradingCalendar.cal_date)).where(
@@ -188,19 +226,31 @@ def sync_status(
         "instruments": instrument_counts,
         "calendar_latest_open_date": latest_calendar,
         "calendar_latest_past_open_date": latest_past_calendar,
+        "calendar_min_date": earliest_calendar,
+        "calendar_max_date": latest_calendar,
+        "calendar_open_days": calendar_open_days,
         "daily_bars": {
             "stock": {"latest_date": latest_stock_bar, "rows": stock_bar_count},
             "etf": {"latest_date": latest_etf_bar, "rows": etf_bar_count},
+            "total_rows": int(bar_totals[2] or 0),
+            "min_date": bar_totals[0],
+            "max_date": bar_totals[1],
         },
         "financial_reports": {
             "latest_period": latest_financial[0] if latest_financial else None,
             "latest_announce_date": latest_financial[1] if latest_financial else None,
             "rows": financial_count,
+            "total_rows": int(financial_totals[2] or 0),
+            "period_min": financial_totals[0],
+            "period_max": financial_totals[1],
         },
         "shareholder_counts": {
             "latest_period": holder_choice[0] if holder_choice else None,
             "latest_announce_date": holder_announce,
             "rows": holder_count,
+            "total_rows": int(holder_totals[2] or 0),
+            "period_min": holder_totals[0],
+            "period_max": holder_totals[1],
             "periods": [
                 {"period_end": period_end, "rows": int(count)}
                 for period_end, count in holder_periods
@@ -275,6 +325,49 @@ def create_sync_request(
         container.redis.publish("qsa:sync:requested", str(entry.id))
     except Exception:
         logger.warning("failed to publish sync request notification", exc_info=True)
+    return SyncRequestRead.model_validate(entry)
+
+
+@router.post("/requests/{request_id}/cancel", response_model=SyncRequestRead)
+def cancel_sync_request(
+    request_id: int,
+    request: Request,
+    actor: User = Depends(require_admin),
+    _: None = Depends(verify_csrf),
+    db: Session = Depends(get_db),
+) -> SyncRequestRead:
+    entry = db.get(SyncRequest, request_id)
+    if entry is None:
+        raise api_error(404, "sync_request_not_found", "同步请求不存在")
+    if entry.status in {"success", "failed", "cancelled"}:
+        raise api_error(409, "sync_request_finished", "任务已经结束，无法停止")
+    if entry.status == "cancelling":
+        return SyncRequestRead.model_validate(entry)
+
+    previous_status = entry.status
+    if entry.status == "queued":
+        entry.status = "cancelled"
+        entry.finished_at = utcnow()
+        entry.error = "用户停止任务"
+        entry.progress = {"phase": "cancelled", "message": "已停止"}
+    elif entry.status == "running":
+        entry.status = "cancelling"
+    else:
+        raise api_error(409, "sync_request_not_running", "任务当前不可停止")
+    entry.updated_at = utcnow()
+
+    add_audit(
+        db,
+        actor_id=actor.id,
+        action="sync.cancel",
+        target_type="sync_request",
+        target_id=str(entry.id),
+        before={"status": previous_status},
+        after={"status": entry.status},
+        ip=get_client_ip(request),
+    )
+    db.commit()
+    db.refresh(entry)
     return SyncRequestRead.model_validate(entry)
 
 

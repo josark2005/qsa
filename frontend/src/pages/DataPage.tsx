@@ -9,6 +9,7 @@ import {
   Loader2,
   Play,
   RefreshCw,
+  Square,
   Users,
 } from "lucide-react"
 import { toast } from "sonner"
@@ -47,12 +48,23 @@ import { formatDate, formatDateTime } from "@/lib/format"
 import type { SyncRequest, SyncRequestCreate, SyncRun } from "@/lib/types"
 
 const PAGE_SIZE = 50
+const MARKET_OPEN_DATE = "1990-12-19"
 
 function statusVariant(status: string) {
   if (status === "success") return "outline" as const
   if (status === "failed") return "destructive" as const
   if (status === "running") return "default" as const
   return "secondary" as const
+}
+
+function statusLabel(status: string): string {
+  if (status === "queued") return "排队中"
+  if (status === "running") return "执行中"
+  if (status === "cancelling") return "停止中"
+  if (status === "cancelled") return "已停止"
+  if (status === "success") return "完成"
+  if (status === "failed") return "失败"
+  return status
 }
 
 function FreshnessBadge({
@@ -74,6 +86,29 @@ function FreshnessBadge({
   return <Badge variant="secondary">滞后</Badge>
 }
 
+function formatSpan(min: string | null, max: string | null): string {
+  if (!min && !max) return "暂无数据"
+  return `${formatDate(min)} ~ ${formatDate(max)}`
+}
+
+function DataSpanItem({
+  label,
+  span,
+  count,
+}: {
+  label: string
+  span: string
+  count: string
+}) {
+  return (
+    <div className="rounded-lg border bg-muted/20 p-3">
+      <div className="text-[11px] text-muted-foreground">{label}</div>
+      <div className="mt-1 text-sm font-medium">{span}</div>
+      <div className="mt-0.5 text-xs text-muted-foreground">{count}</div>
+    </div>
+  )
+}
+
 function RunRow({ run }: { run: SyncRun }) {
   return (
     <TableRow>
@@ -87,7 +122,9 @@ function RunRow({ run }: { run: SyncRun }) {
       </TableCell>
       <TableCell className="text-xs">{STEP_LABELS[run.step] ?? run.step}</TableCell>
       <TableCell>
-        <Badge variant={statusVariant(run.status)}>{run.status}</Badge>
+        <Badge variant={statusVariant(run.status)}>
+          {statusLabel(run.status)}
+        </Badge>
       </TableCell>
       <TableCell className="text-xs text-muted-foreground">{run.trigger}</TableCell>
       <TableCell className="text-xs text-muted-foreground">
@@ -171,6 +208,8 @@ function requestProgressText(request: SyncRequest): string {
   if (request.status === "queued") return "排队中"
   if (request.status === "success") return "完成"
   if (request.status === "failed") return "失败"
+  if (request.status === "cancelling") return "停止中"
+  if (request.status === "cancelled") return "已停止"
   const progress = request.progress
   if (!progress) return "等待进度"
   const phase = PHASE_LABELS[String(progress.phase ?? "")] ?? progress.phase
@@ -319,6 +358,26 @@ export function DataPage() {
       )
     },
   })
+  const cancelMutation = useMutation({
+    mutationFn: (requestId: number) => api.cancelSyncRequest(requestId),
+    onSuccess: (request) => {
+      toast.success(
+        request.status === "cancelled" ? "任务已停止" : "已请求停止任务",
+      )
+      void requestsQuery.refetch()
+      void statusQuery.refetch()
+    },
+    onError: (error) => {
+      toast.error(
+        error instanceof ApiError ? error.message : "停止任务失败",
+      )
+    },
+  })
+
+  function stopRequest(requestId: number) {
+    if (!window.confirm("确定停止该任务？已经写入的数据会保留。")) return
+    cancelMutation.mutate(requestId)
+  }
 
   const status = statusQuery.data
   const fullBackfillReady = status?.worker_full_backfill_ready ?? false
@@ -338,7 +397,10 @@ export function DataPage() {
   const runs = runsQuery.data?.items ?? []
   const requests = requestsQuery.data?.items ?? []
   const runningRequests = requests.filter(
-    (item) => item.status === "running" || item.status === "queued",
+    (item) =>
+      item.status === "running" ||
+      item.status === "queued" ||
+      item.status === "cancelling",
   )
   const activeRequest = runningRequests[0]
   const activeDaily = runningRequests.some(
@@ -454,14 +516,14 @@ export function DataPage() {
       return
     }
     const confirmed = window.confirm(
-      "将依次执行：全市场证券与日历更新、Tencent 全量价格、BaoStock 全字段与多源核对、北交所、涨跌停、财报/股东户数、质量校验。该任务可能持续数小时，确定提交吗？",
+      "将依次执行：全市场证券与日历更新、Tencent 全量价格、BaoStock 全字段与多源核对、北交所、涨跌停、财报/股东户数、质量校验。会从开市历史重新拉取，可能持续数小时，确定提交吗？",
     )
     if (!confirmed) return
     requestMutation.mutate({
       kind: "full_backfill",
       source: "full",
       asset_type: "all",
-      start: "2018-01-01",
+      start: MARKET_OPEN_DATE,
       end: new Date().toISOString().slice(0, 10),
       limit: null,
       rebuild_limits: true,
@@ -581,9 +643,23 @@ export function DataPage() {
               <CardTitle className="text-base">
                 {requestTaskLabel(activeRequest)}进度
               </CardTitle>
-              <Badge variant={statusVariant(activeRequest.status)}>
-                {activeRequest.status}
-              </Badge>
+              <div className="flex items-center gap-2">
+                <Badge variant={statusVariant(activeRequest.status)}>
+                  {statusLabel(activeRequest.status)}
+                </Badge>
+                {activeRequest.status === "running" ||
+                activeRequest.status === "queued" ? (
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    onClick={() => stopRequest(activeRequest.id)}
+                    disabled={cancelMutation.isPending}
+                  >
+                    <Square className="size-3.5" />
+                    停止任务
+                  </Button>
+                ) : null}
+              </div>
             </div>
             <CardDescription>{requestTarget(activeRequest)}</CardDescription>
           </CardHeader>
@@ -740,6 +816,48 @@ export function DataPage() {
               <CardContent className="text-xs text-muted-foreground">
                 {status.shareholder_counts.rows.toLocaleString()} 条 · 公告日{" "}
                 {formatDate(status.shareholder_counts.latest_announce_date)}
+              </CardContent>
+            </Card>
+            <Card className="md:col-span-2 xl:col-span-3">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-base">数据规模</CardTitle>
+                <CardDescription>已入库数据的时间跨度与总条数</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                  <DataSpanItem
+                    label="日线行情"
+                    span={formatSpan(
+                      status.daily_bars.min_date,
+                      status.daily_bars.max_date,
+                    )}
+                    count={`${status.daily_bars.total_rows.toLocaleString()} 条`}
+                  />
+                  <DataSpanItem
+                    label="财报"
+                    span={formatSpan(
+                      status.financial_reports.period_min,
+                      status.financial_reports.period_max,
+                    )}
+                    count={`${status.financial_reports.total_rows.toLocaleString()} 条`}
+                  />
+                  <DataSpanItem
+                    label="股东户数"
+                    span={formatSpan(
+                      status.shareholder_counts.period_min,
+                      status.shareholder_counts.period_max,
+                    )}
+                    count={`${status.shareholder_counts.total_rows.toLocaleString()} 条`}
+                  />
+                  <DataSpanItem
+                    label="交易日历"
+                    span={formatSpan(
+                      status.calendar_min_date,
+                      status.calendar_max_date,
+                    )}
+                    count={`${status.calendar_open_days.toLocaleString()} 个交易日`}
+                  />
+                </div>
               </CardContent>
             </Card>
           </div>
@@ -933,9 +1051,23 @@ export function DataPage() {
                             </div>
                           </TableCell>
                           <TableCell>
-                            <Badge variant={statusVariant(item.status)}>
-                              {item.status}
-                            </Badge>
+                            <div className="flex items-center gap-1.5">
+                              <Badge variant={statusVariant(item.status)}>
+                                {statusLabel(item.status)}
+                              </Badge>
+                              {item.status === "running" ||
+                              item.status === "queued" ? (
+                                <Button
+                                  variant="ghost"
+                                  size="icon-xs"
+                                  title="停止任务"
+                                  onClick={() => stopRequest(item.id)}
+                                  disabled={cancelMutation.isPending}
+                                >
+                                  <Square className="size-3" />
+                                </Button>
+                              ) : null}
+                            </div>
                           </TableCell>
                           <TableCell className="min-w-40">
                             {item.status === "running" ? (
@@ -1099,7 +1231,7 @@ export function DataPage() {
           <pre className="overflow-x-auto rounded-lg bg-muted p-3 text-xs leading-6">
             {`cd backend
 # 一键全量多源回补：Tencent 价格 + BaoStock 全字段核对 + 北交所 + 财报/股东 + 质量校验
-uv run python -m app.cli sync-bars --source full --start 2018-01-01 --asset-type all
+uv run python -m app.cli sync-bars --source full --start ${MARKET_OPEN_DATE} --asset-type all
 
 # 启动 worker，消费网页端提交的同步/回补请求
 uv run python -m app.worker`}
@@ -1111,7 +1243,7 @@ uv run python -m app.worker`}
         <CardHeader className="pb-3">
           <CardTitle className="text-base">全量回补</CardTitle>
           <CardDescription>
-            从 2018-01-01 至今重新拉取完整历史，并执行 Tencent/BaoStock
+            从 {MARKET_OPEN_DATE} 至今重新拉取完整历史，并执行 Tencent/BaoStock
             多源核对。该操作会重新拉取全部历史数据，耗时可能数小时，通常只在重建数据时使用。
           </CardDescription>
         </CardHeader>

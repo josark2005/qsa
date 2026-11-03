@@ -85,9 +85,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Validate deployment and development compose files
         run: |
-          cp .env.production.example .env.production
+          cp .env.example .env
           cp .env.dev.example .env.dev
-          docker compose --env-file .env.production -f docker-compose.yml config > /dev/null
+          docker compose -f docker-compose.yml config > /dev/null
           docker compose --env-file .env.dev -f docker-compose.dev.yml config > /dev/null
 
   build-images:

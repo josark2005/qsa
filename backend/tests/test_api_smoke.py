@@ -26,6 +26,18 @@ def test_login_me_and_no_registration(app_fixture) -> None:
     assert register.status_code == 404
 
 
+def test_sync_status_includes_data_span(app_fixture) -> None:
+    app_fixture.login_admin()
+    response = app_fixture.client.get("/api/admin/sync/status")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["daily_bars"]["total_rows"] == 0
+    assert payload["daily_bars"]["min_date"] is None
+    assert payload["financial_reports"]["total_rows"] == 0
+    assert payload["shareholder_counts"]["period_min"] is None
+    assert payload["calendar_open_days"] >= 0
+
+
 def test_settings_update_conflict_and_audit(app_fixture) -> None:
     login = app_fixture.login_admin()
     csrf = app_fixture.csrf_headers(login["csrf_token"])

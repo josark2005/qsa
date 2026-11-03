@@ -328,6 +328,18 @@ export interface TechnicalResponse {
   message: string | null
 }
 
+export interface InstrumentSearchItem {
+  symbol: string
+  code: string
+  name: string
+  board: string | null
+  industry: string | null
+}
+
+export interface InstrumentSearchResponse {
+  items: InstrumentSearchItem[]
+}
+
 export interface QQGroupSubscription {
   id: number
   group_openid: string
@@ -415,19 +427,31 @@ export interface SyncStatus {
   }>;
   calendar_latest_open_date: string | null;
   calendar_latest_past_open_date: string | null;
+  calendar_min_date: string | null;
+  calendar_max_date: string | null;
+  calendar_open_days: number;
   daily_bars: {
     stock: { latest_date: string | null; rows: number };
     etf: { latest_date: string | null; rows: number };
+    total_rows: number;
+    min_date: string | null;
+    max_date: string | null;
   };
   financial_reports: {
     latest_period: string | null;
     latest_announce_date: string | null;
     rows: number;
+    total_rows: number;
+    period_min: string | null;
+    period_max: string | null;
   };
   shareholder_counts: {
     latest_period: string | null;
     latest_announce_date: string | null;
     rows: number;
+    total_rows: number;
+    period_min: string | null;
+    period_max: string | null;
     periods: Array<{ period_end: string; rows: number }>;
   };
   recent_runs: SyncRun[];

@@ -222,7 +222,7 @@ def command_sync_universe(args: argparse.Namespace) -> int:
 def command_sync_bars(args: argparse.Namespace) -> int:
     engine, session_factory = _session_factory()
     today = today_shanghai()
-    start = date.fromisoformat(args.start) if args.start else date(2018, 1, 1)
+    start = date.fromisoformat(args.start) if args.start else date(1990, 12, 19)
     end = date.fromisoformat(args.end) if args.end else today
     symbols = args.symbol or None
     results: dict = {}

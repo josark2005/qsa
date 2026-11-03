@@ -103,7 +103,7 @@ export function ChangePasswordPage() {
                 required
               />
               <p className="text-xs text-muted-foreground">
-                至少 12 位，不能与当前密码相同。
+                至少 8 位，不能与当前密码相同。
               </p>
             </div>
             <div className="space-y-2">

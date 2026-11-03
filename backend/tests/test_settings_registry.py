@@ -14,6 +14,7 @@ from app.core.settings_registry import (
 def test_defaults_are_valid() -> None:
     values = default_values()
     assert len(values) == len(SETTINGS_BY_KEY)
+    assert values["security.password_min_length"] == 8
     validate_settings_map(values)
 
 

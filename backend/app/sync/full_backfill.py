@@ -18,6 +18,7 @@ from app.sync.bars import (
     recompute_limit_events,
 )
 from app.sync.calendar import sync_trading_calendar
+from app.sync.cancellation import SyncCancelled
 from app.sync.financials import (
     quarter_ends,
     sync_financial_reports,
@@ -29,6 +30,7 @@ from app.sync.universe import sync_universe
 
 logger = logging.getLogger(__name__)
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+MARKET_OPEN_DATE = date(1990, 12, 19)
 ProgressCallback = Callable[[dict], None]
 
 FULL_STEPS = (
@@ -83,6 +85,7 @@ def run_full_backfill(
     include_delisted: bool = False,
     asset_type: str = "all",
     progress_callback: ProgressCallback | None = None,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     run_id = uuid.uuid4()
     results: dict[str, Any] = {}
@@ -102,6 +105,8 @@ def run_full_backfill(
         return callback
 
     def run_step(name: str, label: str, function):
+        if cancel_check is not None and cancel_check():
+            raise SyncCancelled("用户停止任务")
         emit(name, label, percent=0)
         try:
             with StepRun(
@@ -118,6 +123,8 @@ def run_full_backfill(
             results[name] = value
             emit(name, f"{label}完成", percent=100)
             return value
+        except SyncCancelled:
+            raise
         except Exception as exc:
             db.rollback()
             errors[name] = f"{type(exc).__name__}: {exc}"

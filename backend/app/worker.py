@@ -22,7 +22,8 @@ from app.sync.bars import (
     backfill_tencent_bars,
     recompute_limit_events,
 )
-from app.sync.full_backfill import run_full_backfill
+from app.sync.cancellation import SyncCancelled
+from app.sync.full_backfill import MARKET_OPEN_DATE, run_full_backfill
 from app.sync.pipelines import (
     PIPELINE_NAMES,
     run_pipeline,
@@ -168,9 +169,18 @@ class RequestWorker:
             entry = db.get(SyncRequest, request_id)
             if entry is None:
                 return
+            if entry.status in {"cancelling", "cancelled"}:
+                raise SyncCancelled("用户停止任务")
             entry.progress = jsonable_encoder(progress)
             entry.updated_at = utcnow()
             db.commit()
+
+    def _is_cancelling(self, request_id: int) -> bool:
+        with self.session_factory() as db:
+            status = db.scalar(
+                select(SyncRequest.status).where(SyncRequest.id == request_id)
+            )
+            return status in {"cancelling", "cancelled"}
 
     def _finish(
         self,
@@ -193,6 +203,8 @@ class RequestWorker:
                 progress.update(
                     {"phase": "completed", "percent": 100, "message": "完成"}
                 )
+            elif status == "cancelled":
+                progress.update({"phase": "cancelled", "message": "已停止"})
             else:
                 progress.update({"phase": "failed", "message": "执行失败"})
             entry.progress = progress
@@ -202,6 +214,8 @@ class RequestWorker:
     def _execute(self, request: dict) -> dict:
         payload = request["payload"]
         request_id = request["id"]
+        if self._is_cancelling(request_id):
+            raise SyncCancelled("用户停止任务")
         if request["kind"] == "pipeline":
             if not request["pipeline"]:
                 raise ValueError("pipeline request missing pipeline")
@@ -232,7 +246,7 @@ class RequestWorker:
             start = (
                 date.fromisoformat(payload["start"])
                 if payload.get("start")
-                else date(2018, 1, 1)
+                else MARKET_OPEN_DATE
             )
             end = (
                 date.fromisoformat(payload["end"])
@@ -260,6 +274,7 @@ class RequestWorker:
                     include_delisted=include_delisted,
                     asset_type=asset_type,
                     progress_callback=full_progress,
+                    cancel_check=lambda: self._is_cancelling(request_id),
                 )
 
         if request["kind"] != "backfill":
@@ -302,8 +317,11 @@ class RequestWorker:
                     include_delisted=include_delisted,
                     asset_type=asset_type,
                     progress_callback=full_progress,
+                    cancel_check=lambda: self._is_cancelling(request_id),
                 )
             for item in types:
+                if self._is_cancelling(request_id):
+                    raise SyncCancelled("用户停止任务")
                 def progress(update: dict, item: str = item) -> None:
                     self._update_progress(
                         request_id,
@@ -341,6 +359,8 @@ class RequestWorker:
                         full_refresh=full_refresh,
                     )
                 results[item] = payload_result
+            if self._is_cancelling(request_id):
+                raise SyncCancelled("用户停止任务")
             if rebuild_limits:
                 self._update_progress(
                     request_id,
@@ -378,19 +398,42 @@ class RequestWorker:
             logger.info("processing sync request %s: %s", request_id, request["kind"])
             try:
                 result = self._execute(request)
+                if self._is_cancelling(request_id):
+                    self._finish(
+                        request_id,
+                        status="cancelled",
+                        error="用户停止任务",
+                    )
+                    logger.info("sync request %s cancelled", request_id)
+                else:
+                    self._finish(
+                        request_id,
+                        status="success",
+                        result=jsonable_encoder(result),
+                    )
+                    logger.info("sync request %s completed", request_id)
+            except SyncCancelled:
                 self._finish(
                     request_id,
-                    status="success",
-                    result=jsonable_encoder(result),
+                    status="cancelled",
+                    error="用户停止任务",
                 )
-                logger.info("sync request %s completed", request_id)
+                logger.info("sync request %s cancelled", request_id)
             except Exception as exc:
-                logger.exception("sync request %s failed", request_id)
-                self._finish(
-                    request_id,
-                    status="failed",
-                    error=f"{type(exc).__name__}: {exc}",
-                )
+                if self._is_cancelling(request_id):
+                    self._finish(
+                        request_id,
+                        status="cancelled",
+                        error="用户停止任务",
+                    )
+                    logger.info("sync request %s cancelled", request_id)
+                else:
+                    logger.exception("sync request %s failed", request_id)
+                    self._finish(
+                        request_id,
+                        status="failed",
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
         logger.info("sync request worker stopped")
 
 

@@ -17,6 +17,7 @@ import { ReportPage } from "@/pages/ReportPage"
 import { ReportsPage } from "@/pages/ReportsPage"
 import { ScreenerPage } from "@/pages/ScreenerPage"
 import { SettingsPage } from "@/pages/SettingsPage"
+import { TrendsPage } from "@/pages/TrendsPage"
 import { UsersPage } from "@/pages/UsersPage"
 
 function NotFoundPage() {
@@ -46,6 +47,7 @@ function App() {
         <Route element={<AppLayout />}>
           <Route index element={<DashboardPage />} />
           <Route path="screener" element={<ScreenerPage />} />
+          <Route path="trends" element={<TrendsPage />} />
           <Route path="reports" element={<ReportsPage />} />
           <Route
             path="admin/data"

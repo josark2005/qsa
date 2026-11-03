@@ -429,6 +429,7 @@ def backfill_tencent_bars(
     progress_callback: ProgressCallback | None = None,
     progress_every: int = 5,
     full_refresh: bool = False,
+    include_adjust_factors: bool = True,
 ) -> dict:
     end_date = _effective_end_date(end_date)
     statement = select(Instrument).where(
@@ -458,12 +459,15 @@ def backfill_tencent_bars(
         current=None,
     )
     client = TencentKlineClient()
-    bs_client: BaoStockClient | None = BaoStockClient()
-    try:
-        bs_client.__enter__()
-    except Exception:
-        logger.exception("BaoStock factor login failed; using adj_factor=1")
-        bs_client = None
+    bs_client: BaoStockClient | None = (
+        BaoStockClient() if include_adjust_factors else None
+    )
+    if bs_client is not None:
+        try:
+            bs_client.__enter__()
+        except Exception:
+            logger.exception("BaoStock factor login failed; using adj_factor=1")
+            bs_client = None
     try:
         for index, instrument in enumerate(instruments, start=1):
             if progress_callback and (

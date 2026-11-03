@@ -260,6 +260,9 @@ class RequestWorker:
                 settings_service=self.settings_service,
                 redis_client=self.redis_client,
                 cancel_check=lambda: self._is_cancelling(request_id),
+                progress_callback=lambda update: self._update_progress(
+                    request_id, update
+                ),
             )
 
         if request["kind"] == "full_backfill":

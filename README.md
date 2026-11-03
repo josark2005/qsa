@@ -212,7 +212,13 @@ pnpm build
 http://127.0.0.1:7890
 ```
 
-该配置会应用到腾讯和 AkShare 的 requests 请求；BaoStock 使用原始 TCP，不支持 HTTP 代理。Docker 容器内访问宿主机代理时，不能写 `127.0.0.1`，应使用 `host.docker.internal` 或宿主机网关地址。
+该配置会应用到腾讯和 AkShare 的 requests 请求；BaoStock 使用原始 TCP，不支持 HTTP 代理。BaoStock 需要单独配置 SOCKS5：
+
+```ini
+BAOSTOCK_SOCKS_PROXY=socks5h://192.168.1.60:7893
+```
+
+日报的缺失日线已改为优先使用 Tencent；BaoStock 仍用于全量回补和历史因子核对。Docker 容器内访问宿主机代理时，不能写 `127.0.0.1`，应使用 `host.docker.internal` 或宿主机网关地址。
 
 ## CI/CD
 

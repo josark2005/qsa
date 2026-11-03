@@ -4,7 +4,7 @@ import json
 import logging
 import uuid
 from datetime import date
-from typing import Any
+from typing import Any, Callable
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -20,8 +20,8 @@ from app.schemas.screening import ConditionIn
 from app.services.report_pdf import build_report_pdf
 from app.services.screen_reports import create_report_snapshot
 from app.sync.bars import (
-    backfill_baostock_bars,
     backfill_bse_bars,
+    backfill_tencent_bars,
     recompute_limit_events,
 )
 from app.sync.calendar import sync_trading_calendar
@@ -181,6 +181,7 @@ def run_daily_report_pipeline(
     redis_client: Any,
     trigger: str = "schedule",
     cancel_check=None,
+    progress_callback: Callable[[dict], None] | None = None,
 ) -> dict[str, Any]:
     config = get_config()
     run_id = uuid.uuid4()
@@ -208,6 +209,10 @@ def run_daily_report_pipeline(
     def run_step(step: str, function):
         if cancel_check is not None and cancel_check():
             raise SyncCancelled("用户停止任务")
+        if progress_callback is not None:
+            progress_callback(
+                {"phase": step, "message": f"执行 {step}", "percent": 0}
+            )
         try:
             with StepRun(
                 session_factory,
@@ -221,6 +226,10 @@ def run_daily_report_pipeline(
                 rows = value.get("rows") if isinstance(value, dict) else None
                 run.finish(rows=rows, meta=value if isinstance(value, dict) else None)
             results[step] = value
+            if progress_callback is not None:
+                progress_callback(
+                    {"phase": step, "message": f"{step} 完成", "percent": 100}
+                )
             return value
         except SyncCancelled:
             raise
@@ -230,9 +239,20 @@ def run_daily_report_pipeline(
             logger.exception("daily report step failed: %s", step)
             return None
 
-    def bar_progress(_: dict) -> None:
-        if cancel_check is not None and cancel_check():
-            raise SyncCancelled("用户停止任务")
+    def bar_progress(phase: str):
+        def callback(update: dict) -> None:
+            if cancel_check is not None and cancel_check():
+                raise SyncCancelled("用户停止任务")
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        **update,
+                        "phase": phase,
+                        "message": f"{phase} 同步中",
+                    }
+                )
+
+        return callback
 
     run_step(
         "calendar",
@@ -258,27 +278,29 @@ def run_daily_report_pipeline(
     if missing_stock:
         run_step(
             "bars_stock",
-            lambda: backfill_baostock_bars(
+            lambda: backfill_tencent_bars(
                 db,
                 start_date=target_date,
                 end_date=target_date,
                 asset_type="stock",
                 symbols=missing_stock,
-                progress_callback=bar_progress,
-                progress_every=10,
+                include_adjust_factors=False,
+                progress_callback=bar_progress("bars_stock"),
+                progress_every=2,
             ),
         )
     if missing_etf:
         run_step(
             "bars_etf",
-            lambda: backfill_baostock_bars(
+            lambda: backfill_tencent_bars(
                 db,
                 start_date=target_date,
                 end_date=target_date,
                 asset_type="etf",
                 symbols=missing_etf,
-                progress_callback=bar_progress,
-                progress_every=10,
+                include_adjust_factors=False,
+                progress_callback=bar_progress("bars_etf"),
+                progress_every=2,
             ),
         )
     if missing_bse:
@@ -289,8 +311,8 @@ def run_daily_report_pipeline(
                 start_date=target_date,
                 end_date=target_date,
                 symbols=missing_bse,
-                progress_callback=bar_progress,
-                progress_every=10,
+                progress_callback=bar_progress("bars_bse"),
+                progress_every=2,
             ),
         )
 

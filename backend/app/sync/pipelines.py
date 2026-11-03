@@ -534,6 +534,7 @@ def run_pipeline(
     settings_service: Any | None = None,
     redis_client: Any | None = None,
     cancel_check=None,
+    progress_callback=None,
 ) -> dict:
     if name not in PIPELINE_NAMES:
         raise ValueError(f"unknown pipeline: {name}")
@@ -572,6 +573,7 @@ def run_pipeline(
                     redis_client=redis_client,
                     trigger=trigger,
                     cancel_check=cancel_check,
+                    progress_callback=progress_callback,
                 )
             if name == "market":
                 return run_market_pipeline(

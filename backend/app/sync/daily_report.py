@@ -25,6 +25,7 @@ from app.sync.bars import (
     recompute_limit_events,
 )
 from app.sync.calendar import sync_trading_calendar
+from app.sync.cancellation import SyncCancelled
 from app.sync.financials import (
     quarter_ends,
     sync_financial_reports,
@@ -179,6 +180,7 @@ def run_daily_report_pipeline(
     settings: SettingsService,
     redis_client: Any,
     trigger: str = "schedule",
+    cancel_check=None,
 ) -> dict[str, Any]:
     config = get_config()
     run_id = uuid.uuid4()
@@ -204,6 +206,8 @@ def run_daily_report_pipeline(
     )
 
     def run_step(step: str, function):
+        if cancel_check is not None and cancel_check():
+            raise SyncCancelled("用户停止任务")
         try:
             with StepRun(
                 session_factory,
@@ -218,11 +222,17 @@ def run_daily_report_pipeline(
                 run.finish(rows=rows, meta=value if isinstance(value, dict) else None)
             results[step] = value
             return value
+        except SyncCancelled:
+            raise
         except Exception as exc:
             db.rollback()
             errors[step] = f"{type(exc).__name__}: {exc}"
             logger.exception("daily report step failed: %s", step)
             return None
+
+    def bar_progress(_: dict) -> None:
+        if cancel_check is not None and cancel_check():
+            raise SyncCancelled("用户停止任务")
 
     run_step(
         "calendar",
@@ -254,6 +264,8 @@ def run_daily_report_pipeline(
                 end_date=target_date,
                 asset_type="stock",
                 symbols=missing_stock,
+                progress_callback=bar_progress,
+                progress_every=10,
             ),
         )
     if missing_etf:
@@ -265,6 +277,8 @@ def run_daily_report_pipeline(
                 end_date=target_date,
                 asset_type="etf",
                 symbols=missing_etf,
+                progress_callback=bar_progress,
+                progress_every=10,
             ),
         )
     if missing_bse:
@@ -275,6 +289,8 @@ def run_daily_report_pipeline(
                 start_date=target_date,
                 end_date=target_date,
                 symbols=missing_bse,
+                progress_callback=bar_progress,
+                progress_every=10,
             ),
         )
 

@@ -6,7 +6,7 @@ import logging
 import sqlite3
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from sqlalchemy import func, select
 from sqlalchemy.engine import Engine
@@ -20,6 +20,7 @@ from app.models.instrument import Instrument
 from app.models.limit_event import LimitEvent
 from app.models.shareholder_count import ShareholderCount
 from app.models.trading_calendar import TradingCalendar
+from app.sync.cancellation import SyncCancelled
 from app.sync.db_utils import bulk_upsert
 from app.sync.runs import advisory_lock
 
@@ -720,6 +721,8 @@ def import_history(
     *,
     source_dir: Path | None = None,
     force: bool = False,
+    progress_callback: Callable[[dict], None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     directory = source_dir or DEFAULT_HISTORY_DIR
     if not directory.exists():
@@ -727,15 +730,36 @@ def import_history(
     reference = directory / REFERENCE_FILE
     files = [reference] if reference.exists() else []
     files.extend(sorted(directory.glob("[0-9][0-9][0-9][0-9]-[0-9][0-9].db")))
+    total_files = len(files)
     imported = skipped = 0
+    imported_rows = 0
     imported_files: list[str] = []
-    for path in files:
+
+    def emit(index: int, current: str, message: str) -> None:
+        if progress_callback is None:
+            return
+        progress_callback(
+            {
+                "phase": "history",
+                "message": message,
+                "processed": index,
+                "total": total_files,
+                "rows": imported_rows,
+                "current": current,
+                "percent": round(index / total_files * 100, 2) if total_files else 100,
+            }
+        )
+
+    for index, path in enumerate(files, start=1):
+        if cancel_check is not None and cancel_check():
+            raise SyncCancelled("用户停止任务")
         digest = _sha256(path)
         marker = db.scalar(
             select(HistoryImport).where(HistoryImport.filename == path.name)
         )
         if marker is not None and marker.sha256 == digest and not force:
             skipped += 1
+            emit(index, path.name, f"跳过已导入 {path.name}")
             continue
         rows = (
             _import_reference(db, path)
@@ -750,8 +774,12 @@ def import_history(
             marker.imported_at = datetime.utcnow()
         db.commit()
         imported += 1
+        imported_rows += rows
         imported_files.append(path.name)
+        emit(index, path.name, f"已导入 {path.name}（{rows} 行）")
         logger.info("history archive imported %s (%s rows)", path.name, rows)
+    if total_files:
+        emit(total_files, "", "历史归档导入完成")
     return {
         "imported": imported,
         "skipped": skipped,

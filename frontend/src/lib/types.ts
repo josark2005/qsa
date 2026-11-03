@@ -366,7 +366,7 @@ export interface QQBotStatus {
 }
 
 export interface SyncRequestCreate {
-  kind: "pipeline" | "backfill" | "full_backfill"
+  kind: "pipeline" | "backfill" | "full_backfill" | "history_import"
   pipeline?: string | null
   target_date?: string | null
   start?: string | null
@@ -377,6 +377,7 @@ export interface SyncRequestCreate {
   include_delisted?: boolean
   rebuild_limits?: boolean
   full_refresh?: boolean
+  force?: boolean
 }
 
 export interface SyncRequestProgress {
@@ -453,6 +454,18 @@ export interface SyncStatus {
     period_min: string | null;
     period_max: string | null;
     periods: Array<{ period_end: string; rows: number }>;
+  };
+  history: {
+    directory: string;
+    archive_files: number;
+    archive_bytes: number;
+    imported_files: number;
+    imported_rows: number;
+    archive_expected_rows: number;
+    pending_files: number;
+    daily_bar_rows: number;
+    needs_import: boolean;
+    needs_force_import: boolean;
   };
   recent_runs: SyncRun[];
   worker_full_backfill_ready: boolean;

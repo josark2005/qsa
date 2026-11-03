@@ -44,6 +44,28 @@ def test_cancel_queued_sync_request(app_fixture) -> None:
     assert again.json()["code"] == "sync_request_finished"
 
 
+def test_cancel_queued_history_import(app_fixture) -> None:
+    login = app_fixture.login_admin()
+    csrf = app_fixture.csrf_headers(login["csrf_token"])
+
+    created = app_fixture.client.post(
+        "/api/admin/sync/requests",
+        headers=csrf,
+        json={"kind": "history_import", "force": True},
+    )
+    assert created.status_code == 200, created.text
+    payload = created.json()
+    assert payload["kind"] == "history_import"
+    assert payload["payload"]["force"] is True
+
+    cancelled = app_fixture.client.post(
+        f"/api/admin/sync/requests/{payload['id']}/cancel",
+        headers=csrf,
+    )
+    assert cancelled.status_code == 200, cancelled.text
+    assert cancelled.json()["status"] == "cancelled"
+
+
 def test_worker_stops_when_request_is_cancelling(tmp_path) -> None:
     engine = make_engine(f"sqlite:///{(tmp_path / 'cancel.db').as_posix()}")
     Base.metadata.create_all(engine)

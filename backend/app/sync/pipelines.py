@@ -22,6 +22,7 @@ from app.sync.calendar import (
     latest_trading_day,
     sync_trading_calendar,
 )
+from app.sync.cancellation import SyncCancelled
 from app.sync.daily_report import run_daily_report_pipeline
 from app.sync.financials import (
     quarter_ends,
@@ -47,6 +48,11 @@ PIPELINE_NAMES = (
 
 def today_shanghai() -> date:
     return datetime.now(SHANGHAI).date()
+
+
+def _ensure_not_cancelled(cancel_check) -> None:
+    if cancel_check is not None and cancel_check():
+        raise SyncCancelled("用户停止任务")
 
 
 def ensure_calendar(db: Session) -> None:
@@ -527,10 +533,12 @@ def run_pipeline(
     limit: int | None = None,
     settings_service: Any | None = None,
     redis_client: Any | None = None,
+    cancel_check=None,
 ) -> dict:
     if name not in PIPELINE_NAMES:
         raise ValueError(f"unknown pipeline: {name}")
 
+    _ensure_not_cancelled(cancel_check)
     with session_factory() as db:
         ensure_calendar(db)
         today = today_shanghai()
@@ -563,6 +571,7 @@ def run_pipeline(
                     settings=settings_service,
                     redis_client=redis_client,
                     trigger=trigger,
+                    cancel_check=cancel_check,
                 )
             if name == "market":
                 return run_market_pipeline(

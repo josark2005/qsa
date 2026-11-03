@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -16,10 +18,12 @@ from app.api.deps import (
     require_admin,
     verify_csrf,
 )
+from app.core.config import get_config
 from app.core.container import Container
 from app.core.db import utcnow
 from app.models.daily_bar import DailyBar
 from app.models.financial_report import FinancialReport
+from app.models.history_import import HistoryImport
 from app.models.instrument import Instrument
 from app.models.shareholder_count import ShareholderCount
 from app.models.sync_request import SyncRequest
@@ -32,6 +36,7 @@ from app.schemas.sync import (
     SyncRequestRead,
 )
 from app.services.audit import add_audit
+from app.services.history_archive import DEFAULT_HISTORY_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -222,6 +227,57 @@ def sync_status(
         select(SyncRun).order_by(SyncRun.started_at.desc()).limit(15)
     ).all()
 
+    imported_files, imported_rows = db.execute(
+        select(
+            func.count(),
+            func.coalesce(func.sum(HistoryImport.rows), 0),
+        ).select_from(HistoryImport)
+    ).one()
+    config = get_config()
+    history_dir = (
+        Path(config.history_dir) if config.history_dir else DEFAULT_HISTORY_DIR
+    )
+    archive_paths = []
+    if history_dir.exists():
+        archive_paths = [
+            path
+            for path in history_dir.glob("*.db")
+            if path.name == "qsa-reference.db"
+            or (
+                len(path.stem) == 7
+                and path.stem[4] == "-"
+                and path.stem[:4].isdigit()
+                and path.stem[5:].isdigit()
+            )
+        ]
+    archive_files = len(archive_paths)
+    archive_bytes = sum(path.stat().st_size for path in archive_paths)
+    bar_rows = int(bar_totals[2] or 0)
+    marker_count = int(imported_files or 0)
+    marker_rows = int(imported_rows or 0)
+    archive_expected_rows = 0
+    manifest_path = history_dir / "manifest.json"
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            archive_expected_rows = int(manifest.get("daily_bar_rows") or 0)
+        except (OSError, ValueError, TypeError):
+            logger.warning("failed to read history manifest %s", manifest_path)
+    if archive_expected_rows == 0:
+        archive_expected_rows = marker_rows
+    needs_force_import = (
+        archive_files > 0
+        and archive_expected_rows > 0
+        and bar_rows < int(archive_expected_rows * 0.9)
+    )
+    if (
+        not needs_force_import
+        and archive_files > 0
+        and archive_expected_rows == 0
+        and bar_rows < 100_000
+    ):
+        needs_force_import = True
+
     return {
         "instruments": instrument_counts,
         "calendar_latest_open_date": latest_calendar,
@@ -255,6 +311,19 @@ def sync_status(
                 {"period_end": period_end, "rows": int(count)}
                 for period_end, count in holder_periods
             ],
+        },
+        "history": {
+            "directory": str(history_dir),
+            "archive_files": archive_files,
+            "archive_bytes": archive_bytes,
+            "imported_files": marker_count,
+            "imported_rows": marker_rows,
+            "archive_expected_rows": archive_expected_rows,
+            "pending_files": max(archive_files - marker_count, 0),
+            "daily_bar_rows": bar_rows,
+            "needs_import": archive_files > 0
+            and (marker_count == 0 or archive_files > marker_count),
+            "needs_force_import": needs_force_import,
         },
         "recent_runs": [_run_payload(run) for run in recent_runs],
         "worker_full_backfill_ready": (
@@ -295,6 +364,19 @@ def create_sync_request(
                 409,
                 "backfill_active",
                 "已有回补任务在队列或执行中，请等待完成后再执行一键全量回补",
+            )
+    if payload.kind == "history_import":
+        active = db.scalars(
+            select(SyncRequest).where(
+                SyncRequest.kind == "history_import",
+                SyncRequest.status.in_(["queued", "running", "cancelling"]),
+            )
+        ).all()
+        if active:
+            raise api_error(
+                409,
+                "history_import_active",
+                "已有历史数据导入任务在队列或执行中",
             )
     data = payload.model_dump(mode="json", exclude={"kind", "pipeline"})
     entry = SyncRequest(

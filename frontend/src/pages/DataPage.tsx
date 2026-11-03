@@ -145,6 +145,7 @@ const PHASE_LABELS: Record<string, string> = {
   stock: "日线",
   etf: "日线",
   bse: "北交所",
+  history: "历史导入",
   limits: "涨跌停",
   pipeline: "Pipeline",
   calendar: "交易日历",
@@ -260,6 +261,9 @@ function requestTaskLabel(request: SyncRequest): string {
   if (request.kind === "pipeline") {
     return PIPELINE_LABELS[String(request.pipeline)] ?? request.pipeline ?? "Pipeline"
   }
+  if (request.kind === "history_import") {
+    return request.payload.force ? "强制导入历史数据" : "导入历史数据"
+  }
   if (request.kind === "full_backfill" || request.payload.source === "full") {
     return "全量多源回补"
   }
@@ -278,6 +282,9 @@ function requestTarget(request: SyncRequest): string {
   if (request.kind === "pipeline") {
     return PIPELINE_LABELS[String(request.pipeline)] ?? request.pipeline ?? "—"
   }
+  if (request.kind === "history_import") {
+    return "data/history"
+  }
   const payload = request.payload
   const source =
     payload.source === "full" ? "多源核对" : String(payload.source ?? "")
@@ -293,6 +300,11 @@ function requestSummary(request: SyncRequest): string {
   const parts: string[] = []
   const stock = result.stock as { rows?: number } | undefined
   const etf = result.etf as { rows?: number } | undefined
+  if (typeof result.imported === "number") {
+    parts.push(
+      `导入 ${result.imported} 个文件 · 跳过 ${Number(result.skipped ?? 0)}`,
+    )
+  }
   if (stock?.rows || etf?.rows) {
     parts.push(`日线 ${(stock?.rows ?? 0) + (etf?.rows ?? 0)}`)
   }
@@ -379,6 +391,34 @@ export function DataPage() {
     cancelMutation.mutate(requestId)
   }
 
+  const historyMutation = useMutation({
+    mutationFn: (force: boolean) =>
+      api.createSyncRequest({ kind: "history_import", force }),
+    onSuccess: () => {
+      toast.success("历史数据导入请求已提交，请在请求列表中查看进度")
+      void requestsQuery.refetch()
+      void statusQuery.refetch()
+    },
+    onError: (error) => {
+      toast.error(
+        error instanceof ApiError ? error.message : "提交历史导入失败",
+      )
+    },
+  })
+
+  function submitHistoryImport(force: boolean) {
+    const history = status?.history
+    if (!history || history.archive_files === 0) {
+      toast.error("没有检测到历史归档文件")
+      return
+    }
+    const message = force
+      ? "将强制重新导入全部归档文件，已有数据会被更新。该操作可能持续较长时间，确定继续吗？"
+      : "将导入尚未导入或内容已变化的归档文件，确定继续吗？"
+    if (!window.confirm(message)) return
+    historyMutation.mutate(force)
+  }
+
   const status = statusQuery.data
   const fullBackfillReady = status?.worker_full_backfill_ready ?? false
   const activeStocks =
@@ -403,6 +443,11 @@ export function DataPage() {
       item.status === "cancelling",
   )
   const activeRequest = runningRequests[0]
+  const activeHistoryImport = requests.some(
+    (item) =>
+      item.kind === "history_import" &&
+      ["queued", "running", "cancelling"].includes(item.status),
+  )
   const activeDaily = runningRequests.some(
     (item) => item.kind === "pipeline" && item.pipeline === "daily_report",
   )
@@ -861,6 +906,103 @@ export function DataPage() {
               </CardContent>
             </Card>
           </div>
+
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base">历史数据导入</CardTitle>
+              <CardDescription>
+                自动检测归档文件与数据库条数，可补导缺失文件或强制重新导入。
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <DataSpanItem
+                  label="归档文件"
+                  span={`${status.history.archive_files.toLocaleString()} 个`}
+                  count={formatBytes(status.history.archive_bytes)}
+                />
+                <DataSpanItem
+                  label="已导入标记"
+                  span={`${status.history.imported_files.toLocaleString()} 个`}
+                  count={
+                    status.history.archive_expected_rows > 0
+                      ? `归档预期 ${status.history.archive_expected_rows.toLocaleString()} 条`
+                      : `记录 ${status.history.imported_rows.toLocaleString()} 条`
+                  }
+                />
+                <DataSpanItem
+                  label="待导入文件"
+                  span={`${status.history.pending_files.toLocaleString()} 个`}
+                  count={
+                    status.history.needs_import ? "检测到未导入归档" : "已同步"
+                  }
+                />
+                <DataSpanItem
+                  label="数据库日线"
+                  span={`${status.history.daily_bar_rows.toLocaleString()} 条`}
+                  count={
+                    status.history.needs_force_import
+                      ? "明显少于归档记录"
+                      : "正常"
+                  }
+                />
+              </div>
+              {status.history.needs_force_import ? (
+                <Alert className="border-amber-500/40 bg-amber-500/5">
+                  <AlertTriangle className="size-4" />
+                  <AlertDescription>
+                    数据库日线数量明显少于历史导入记录，可能存在导入标记但数据未落库。建议执行“强制重新导入”。
+                  </AlertDescription>
+                </Alert>
+              ) : status.history.needs_import ? (
+                <Alert>
+                  <AlertTriangle className="size-4" />
+                  <AlertDescription>
+                    检测到尚未导入的历史归档，可执行“导入缺失历史”。
+                  </AlertDescription>
+                </Alert>
+              ) : null}
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <p className="text-[11px] text-muted-foreground">
+                  归档目录：{status.history.directory}
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    variant="outline"
+                    onClick={() => submitHistoryImport(false)}
+                    disabled={
+                      historyMutation.isPending ||
+                      activeHistoryImport ||
+                      status.history.archive_files === 0
+                    }
+                  >
+                    {historyMutation.isPending ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <RefreshCw className="size-4" />
+                    )}
+                    导入缺失历史
+                  </Button>
+                  <Button
+                    variant="destructive"
+                    onClick={() => submitHistoryImport(true)}
+                    disabled={
+                      historyMutation.isPending ||
+                      activeHistoryImport ||
+                      status.history.archive_files === 0
+                    }
+                  >
+                    {historyMutation.isPending ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <RefreshCw className="size-4" />
+                    )}
+                    强制重新导入
+                  </Button>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
 
         </>
       ) : null}

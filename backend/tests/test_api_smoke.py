@@ -36,6 +36,10 @@ def test_sync_status_includes_data_span(app_fixture) -> None:
     assert payload["financial_reports"]["total_rows"] == 0
     assert payload["shareholder_counts"]["period_min"] is None
     assert payload["calendar_open_days"] >= 0
+    history = payload["history"]
+    assert history["imported_files"] == 0
+    assert history["daily_bar_rows"] == 0
+    assert history["needs_import"] == (history["archive_files"] > 0)
 
 
 def test_settings_update_conflict_and_audit(app_fixture) -> None:

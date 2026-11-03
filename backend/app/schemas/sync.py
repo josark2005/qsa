@@ -18,7 +18,7 @@ BackfillSource = Literal["tencent", "baostock", "full"]
 
 
 class SyncRequestCreate(BaseModel):
-    kind: Literal["pipeline", "backfill", "full_backfill"]
+    kind: Literal["pipeline", "backfill", "full_backfill", "history_import"]
     pipeline: PipelineName | None = None
     target_date: date | None = None
     start: date | None = None
@@ -29,6 +29,7 @@ class SyncRequestCreate(BaseModel):
     include_delisted: bool = False
     rebuild_limits: bool = True
     full_refresh: bool = False
+    force: bool = False
     symbols: list[str] = Field(default_factory=list, max_length=100)
 
     @model_validator(mode="after")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 from datetime import date
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from apscheduler.executors.pool import ThreadPoolExecutor
@@ -17,6 +18,7 @@ from app.core.redis_client import make_redis
 from app.core.settings_service import SettingsService
 from app.core.settings_watcher import SettingsWatcher
 from app.models.sync_request import SyncRequest
+from app.services.history_archive import DEFAULT_HISTORY_DIR, import_history
 from app.sync.bars import (
     backfill_baostock_bars,
     backfill_tencent_bars,
@@ -216,6 +218,23 @@ class RequestWorker:
         request_id = request["id"]
         if self._is_cancelling(request_id):
             raise SyncCancelled("用户停止任务")
+        if request["kind"] == "history_import":
+            config = get_config()
+            directory = (
+                Path(config.history_dir)
+                if config.history_dir
+                else DEFAULT_HISTORY_DIR
+            )
+            with self.session_factory() as db:
+                return import_history(
+                    db,
+                    source_dir=directory,
+                    force=bool(payload.get("force", False)),
+                    progress_callback=lambda update: self._update_progress(
+                        request_id, update
+                    ),
+                    cancel_check=lambda: self._is_cancelling(request_id),
+                )
         if request["kind"] == "pipeline":
             if not request["pipeline"]:
                 raise ValueError("pipeline request missing pipeline")
@@ -240,6 +259,7 @@ class RequestWorker:
                 trigger="manual",
                 settings_service=self.settings_service,
                 redis_client=self.redis_client,
+                cancel_check=lambda: self._is_cancelling(request_id),
             )
 
         if request["kind"] == "full_backfill":

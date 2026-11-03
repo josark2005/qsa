@@ -1,0 +1,25 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+*.log
+*.db
+node_modules/
+dist/
+data/poc/
+data/raw/
+data/lake/
+data/reports/
+data/baseline/
+
+# Docker deployment secrets and dumps
+.env.production
+.env.dev
+data/bootstrap/
+
+# Docker bind-mounted runtime data
+data/postgres/
+data/redis/
+data/dev/

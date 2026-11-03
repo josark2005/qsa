@@ -1,0 +1,12 @@
+{
+  "index": 6213,
+  "total": 6943,
+  "current": "603999.SH",
+  "verification": {
+    "checked": 7572198,
+    "matched": 7542521,
+    "mismatched": 29677,
+    "tencent_only": 24750,
+    "sina_only": 2215
+  }
+}

@@ -1,0 +1,118 @@
+name: qsa-dev
+
+services:
+  postgres:
+    image: postgres:18.6-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-qsa}
+      POSTGRES_USER: ${POSTGRES_USER:-qsa}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-qsa}
+    ports:
+      - "${DEV_BIND_IP:-0.0.0.0}:5432:5432"
+    volumes:
+      - ./data/dev/postgres:/var/lib/postgresql
+    shm_size: 256mb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${DEV_BIND_IP:-0.0.0.0}:6379:6379"
+    volumes:
+      - ./data/dev/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  backend:
+    image: qsa-backend-dev:local
+    build:
+      context: ./backend
+      target: dev
+    command: ["sh", "/app/docker/dev-entrypoint.sh", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    ports:
+      - "${DEV_BIND_IP:-0.0.0.0}:8000:8000"
+    environment:
+      APP_ENV: dev
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-qsa}:${POSTGRES_PASSWORD:-qsa}@postgres:5432/${POSTGRES_DB:-qsa}
+      REDIS_URL: redis://redis:6379/0
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
+      SESSION_COOKIE_SECURE: "false"
+      HISTORY_DIR: /app/data/history
+      HISTORY_AUTO_IMPORT: ${HISTORY_AUTO_IMPORT:-true}
+      QSA_REPORT_PDF_DIR: /app/data/reports
+      QSA_ADMIN_USERNAME: ${QSA_ADMIN_USERNAME:-admin}
+      QSA_ADMIN_PASSWORD: ${QSA_ADMIN_PASSWORD:-DevPassword123}
+      QQ_BOT_APP_ID: ${QQ_BOT_APP_ID:-}
+      QQ_BOT_APP_SECRET: ${QQ_BOT_APP_SECRET:-}
+      QQ_BOT_PUBLIC_BASE_URL: ${QQ_BOT_PUBLIC_BASE_URL:-http://localhost:5173}
+    volumes:
+      - ./backend:/app
+      - ./data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 120s
+    restart: unless-stopped
+
+  worker:
+    image: qsa-backend-dev:local
+    build:
+      context: ./backend
+      target: dev
+    command: ["python", "-m", "app.worker"]
+    environment:
+      APP_ENV: dev
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-qsa}:${POSTGRES_PASSWORD:-qsa}@postgres:5432/${POSTGRES_DB:-qsa}
+      REDIS_URL: redis://redis:6379/0
+      HISTORY_DIR: /app/data/history
+      QSA_REPORT_PDF_DIR: /app/data/reports
+      QQ_BOT_APP_ID: ${QQ_BOT_APP_ID:-}
+      QQ_BOT_APP_SECRET: ${QQ_BOT_APP_SECRET:-}
+    volumes:
+      - ./backend:/app
+      - ./data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    image: qsa-frontend-dev:local
+    build:
+      context: ./frontend
+      target: dev
+    ports:
+      - "${DEV_BIND_IP:-0.0.0.0}:5173:5173"
+    environment:
+      VITE_PROXY_TARGET: http://backend:8000
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+      - ./frontend/index.html:/app/index.html
+      - ./frontend/vite.config.ts:/app/vite.config.ts
+      - ./frontend/tsconfig.json:/app/tsconfig.json
+      - ./frontend/tsconfig.app.json:/app/tsconfig.app.json
+      - ./frontend/tsconfig.node.json:/app/tsconfig.node.json
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped

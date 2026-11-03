@@ -1,0 +1,1157 @@
+{
+  "checked": 7572198,
+  "matched": 7542521,
+  "mismatched": 29677,
+  "tencent_only": 24750,
+  "sina_only": 2215,
+  "samples": [
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1991-11-18",
+      "fields": {
+        "open": {
+          "tencent": 34.35,
+          "sina": 34.85
+        },
+        "high": {
+          "tencent": 34.35,
+          "sina": 34.85
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1991-11-25",
+      "fields": {
+        "low": {
+          "tencent": 30.45,
+          "sina": 28.8
+        },
+        "close": {
+          "tencent": 31.0,
+          "sina": 28.8
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1991-12-19",
+      "fields": {
+        "open": {
+          "tencent": 27.7,
+          "sina": 27.6
+        },
+        "high": {
+          "tencent": 27.75,
+          "sina": 27.8
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1991-12-20",
+      "fields": {
+        "close": {
+          "tencent": 27.65,
+          "sina": 27.5
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1991-12-24",
+      "fields": {
+        "low": {
+          "tencent": 27.9,
+          "sina": 27.0
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1992-01-02",
+      "fields": {
+        "open": {
+          "tencent": 44.85,
+          "sina": 29.35
+        },
+        "high": {
+          "tencent": 45.1,
+          "sina": 29.4
+        },
+        "low": {
+          "tencent": 44.3,
+          "sina": 29.0
+        },
+        "close": {
+          "tencent": 44.5,
+          "sina": 29.15
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1992-04-20",
+      "fields": {
+        "high": {
+          "tencent": 32.5,
+          "sina": 32.3
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1992-06-09",
+      "fields": {
+        "close": {
+          "tencent": 39.85,
+          "sina": 39.65
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1992-06-23",
+      "fields": {
+        "high": {
+          "tencent": 35.8,
+          "sina": 35.3
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1992-07-06",
+      "fields": {
+        "close": {
+          "tencent": 40.8,
+          "sina": 40.0
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1992-08-03",
+      "fields": {
+        "open": {
+          "tencent": 45.6,
+          "sina": 14.87
+        },
+        "high": {
+          "tencent": 45.6,
+          "sina": 14.89
+        },
+        "low": {
+          "tencent": 42.8,
+          "sina": 14.38
+        },
+        "close": {
+          "tencent": 42.9,
+          "sina": 14.44
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1992-11-20",
+      "fields": {
+        "low": {
+          "tencent": 31.1,
+          "sina": 31.2
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1993-02-26",
+      "fields": {
+        "close": {
+          "tencent": 58.8,
+          "sina": 58.9
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1993-03-04",
+      "fields": {
+        "close": {
+          "tencent": 58.1,
+          "sina": 58.2
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1993-07-06",
+      "fields": {
+        "close": {
+          "tencent": 25.35,
+          "sina": 25.3
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1993-08-30",
+      "fields": {
+        "close": {
+          "tencent": 23.25,
+          "sina": 23.3
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1993-09-08",
+      "fields": {
+        "close": {
+          "tencent": 23.35,
+          "sina": 23.4
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1993-10-11",
+      "fields": {
+        "open": {
+          "tencent": 22.25,
+          "sina": 22.5
+        },
+        "high": {
+          "tencent": 22.4,
+          "sina": 22.5
+        },
+        "low": {
+          "tencent": 22.2,
+          "sina": 22.3
+        },
+        "close": {
+          "tencent": 22.25,
+          "sina": 22.3
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1995-04-24",
+      "fields": {
+        "close": {
+          "tencent": 10.45,
+          "sina": 10.43
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1995-05-26",
+      "fields": {
+        "close": {
+          "tencent": 10.0,
+          "sina": 9.98
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1995-05-29",
+      "fields": {
+        "close": {
+          "tencent": 10.03,
+          "sina": 10.0
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1995-06-08",
+      "fields": {
+        "close": {
+          "tencent": 9.8,
+          "sina": 9.85
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1995-06-26",
+      "fields": {
+        "close": {
+          "tencent": 9.31,
+          "sina": 9.33
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1995-08-18",
+      "fields": {
+        "close": {
+          "tencent": 10.05,
+          "sina": 10.02
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1996-05-16",
+      "fields": {
+        "close": {
+          "tencent": 17.52,
+          "sina": 17.55
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1996-05-21",
+      "fields": {
+        "low": {
+          "tencent": 16.7,
+          "sina": 16.89
+        },
+        "close": {
+          "tencent": 16.8,
+          "sina": 16.9
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1996-12-13",
+      "fields": {
+        "close": {
+          "tencent": 18.73,
+          "sina": 18.78
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1997-01-10",
+      "fields": {
+        "close": {
+          "tencent": 16.86,
+          "sina": 16.9
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1997-01-31",
+      "fields": {
+        "close": {
+          "tencent": 19.24,
+          "sina": 19.29
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1997-03-06",
+      "fields": {
+        "close": {
+          "tencent": 19.02,
+          "sina": 19.05
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1997-03-18",
+      "fields": {
+        "close": {
+          "tencent": 22.59,
+          "sina": 22.55
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1997-04-04",
+      "fields": {
+        "close": {
+          "tencent": 28.92,
+          "sina": 29.0
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1997-04-15",
+      "fields": {
+        "close": {
+          "tencent": 28.15,
+          "sina": 28.1
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1997-04-18",
+      "fields": {
+        "close": {
+          "tencent": 28.93,
+          "sina": 29.0
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1997-05-08",
+      "fields": {
+        "close": {
+          "tencent": 44.69,
+          "sina": 44.9
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1997-05-12",
+      "fields": {
+        "close": {
+          "tencent": 46.14,
+          "sina": 46.3
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1998-05-13",
+      "fields": {
+        "close": {
+          "tencent": 20.41,
+          "sina": 20.45
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "1998-10-13",
+      "fields": {
+        "close": {
+          "tencent": 15.22,
+          "sina": 15.25
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "2000-01-28",
+      "fields": {
+        "close": {
+          "tencent": 18.53,
+          "sina": 18.5
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "2000-04-17",
+      "fields": {
+        "close": {
+          "tencent": 19.21,
+          "sina": 19.18
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "2000-08-22",
+      "fields": {
+        "close": {
+          "tencent": 18.13,
+          "sina": 18.16
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "2009-05-13",
+      "fields": {
+        "high": {
+          "tencent": 18.17,
+          "sina": 18.2
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "2009-06-01",
+      "fields": {
+        "high": {
+          "tencent": 18.47,
+          "sina": 18.5
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "2009-06-04",
+      "fields": {
+        "high": {
+          "tencent": 20.84,
+          "sina": 20.88
+        },
+        "low": {
+          "tencent": 19.76,
+          "sina": 19.7
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "2009-06-05",
+      "fields": {
+        "high": {
+          "tencent": 20.55,
+          "sina": 20.6
+        },
+        "low": {
+          "tencent": 19.88,
+          "sina": 19.85
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "2009-06-15",
+      "fields": {
+        "low": {
+          "tencent": 21.07,
+          "sina": 21.0
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "2009-06-16",
+      "fields": {
+        "low": {
+          "tencent": 21.48,
+          "sina": 21.4
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "2009-06-18",
+      "fields": {
+        "low": {
+          "tencent": 21.8,
+          "sina": 21.75
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "2009-06-22",
+      "fields": {
+        "low": {
+          "tencent": 21.65,
+          "sina": 21.6
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "2009-06-30",
+      "fields": {
+        "low": {
+          "tencent": 21.66,
+          "sina": 21.61
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "2011-12-13",
+      "fields": {
+        "low": {
+          "tencent": 15.7,
+          "sina": 15.64
+        },
+        "close": {
+          "tencent": 15.86,
+          "sina": 15.68
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "2011-12-14",
+      "fields": {
+        "low": {
+          "tencent": 15.56,
+          "sina": 15.5
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "2011-12-15",
+      "fields": {
+        "low": {
+          "tencent": 15.28,
+          "sina": 15.02
+        },
+        "close": {
+          "tencent": 15.3,
+          "sina": 15.05
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "2014-04-23",
+      "fields": {
+        "close": {
+          "tencent": 11.28,
+          "sina": 11.3
+        }
+      }
+    },
+    {
+      "symbol": "000001.SZ",
+      "trade_date": "2016-01-04",
+      "fields": {
+        "close": {
+          "tencent": 11.3,
+          "sina": 11.33
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-02-12",
+      "fields": {
+        "open": {
+          "tencent": 15.17,
+          "sina": 15.07
+        },
+        "high": {
+          "tencent": 15.17,
+          "sina": 15.07
+        },
+        "low": {
+          "tencent": 15.17,
+          "sina": 15.07
+        },
+        "close": {
+          "tencent": 15.17,
+          "sina": 15.07
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-02-25",
+      "fields": {
+        "high": {
+          "tencent": 15.49,
+          "sina": 15.33
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-03-29",
+      "fields": {
+        "open": {
+          "tencent": 13.32,
+          "sina": 13.18
+        },
+        "high": {
+          "tencent": 13.32,
+          "sina": 13.18
+        },
+        "low": {
+          "tencent": 13.32,
+          "sina": 13.18
+        },
+        "close": {
+          "tencent": 13.32,
+          "sina": 13.18
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-05-14",
+      "fields": {
+        "open": {
+          "tencent": 11.11,
+          "sina": 10.99
+        },
+        "close": {
+          "tencent": 11.11,
+          "sina": 10.99
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-05-23",
+      "fields": {
+        "open": {
+          "tencent": 11.47,
+          "sina": 11.59
+        },
+        "low": {
+          "tencent": 11.47,
+          "sina": 11.59
+        },
+        "close": {
+          "tencent": 11.47,
+          "sina": 11.59
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-06-10",
+      "fields": {
+        "open": {
+          "tencent": 7.4,
+          "sina": 7.5
+        },
+        "high": {
+          "tencent": 7.4,
+          "sina": 7.5
+        },
+        "low": {
+          "tencent": 6.0,
+          "sina": 7.5
+        },
+        "close": {
+          "tencent": 6.0,
+          "sina": 7.5
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-06-11",
+      "fields": {
+        "close": {
+          "tencent": 7.75,
+          "sina": 6.2
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-06-12",
+      "fields": {
+        "close": {
+          "tencent": 7.7,
+          "sina": 7.85
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-06-13",
+      "fields": {
+        "close": {
+          "tencent": 7.4,
+          "sina": 7.75
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-06-14",
+      "fields": {
+        "close": {
+          "tencent": 6.9,
+          "sina": 7.4
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-06-17",
+      "fields": {
+        "close": {
+          "tencent": 6.8,
+          "sina": 6.55
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-06-18",
+      "fields": {
+        "close": {
+          "tencent": 6.85,
+          "sina": 6.75
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-06-20",
+      "fields": {
+        "close": {
+          "tencent": 6.65,
+          "sina": 6.8
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-06-21",
+      "fields": {
+        "close": {
+          "tencent": 6.5,
+          "sina": 6.65
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-06-24",
+      "fields": {
+        "close": {
+          "tencent": 6.1,
+          "sina": 6.3
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-06-25",
+      "fields": {
+        "close": {
+          "tencent": 6.2,
+          "sina": 6.0
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-06-26",
+      "fields": {
+        "close": {
+          "tencent": 6.4,
+          "sina": 6.1
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-06-27",
+      "fields": {
+        "close": {
+          "tencent": 6.5,
+          "sina": 6.4
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-06-28",
+      "fields": {
+        "close": {
+          "tencent": 6.6,
+          "sina": 6.55
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-07-01",
+      "fields": {
+        "close": {
+          "tencent": 6.5,
+          "sina": 6.6
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-07-02",
+      "fields": {
+        "close": {
+          "tencent": 6.3,
+          "sina": 6.5
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-07-03",
+      "fields": {
+        "close": {
+          "tencent": 6.3,
+          "sina": 6.2
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-07-04",
+      "fields": {
+        "close": {
+          "tencent": 6.15,
+          "sina": 6.3
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-07-08",
+      "fields": {
+        "close": {
+          "tencent": 5.45,
+          "sina": 6.0
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-07-10",
+      "fields": {
+        "close": {
+          "tencent": 5.4,
+          "sina": 5.2
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-07-11",
+      "fields": {
+        "close": {
+          "tencent": 5.1,
+          "sina": 5.3
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-07-12",
+      "fields": {
+        "open": {
+          "tencent": 5.0,
+          "sina": 5.1
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-07-15",
+      "fields": {
+        "open": {
+          "tencent": 5.05,
+          "sina": 5.5
+        },
+        "high": {
+          "tencent": 5.05,
+          "sina": 5.5
+        },
+        "close": {
+          "tencent": 4.9,
+          "sina": 5.05
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-07-16",
+      "fields": {
+        "open": {
+          "tencent": 4.9,
+          "sina": 4.85
+        },
+        "close": {
+          "tencent": 4.9,
+          "sina": 4.85
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-07-17",
+      "fields": {
+        "low": {
+          "tencent": 4.3,
+          "sina": 4.6
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-07-18",
+      "fields": {
+        "close": {
+          "tencent": 5.6,
+          "sina": 4.6
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-07-19",
+      "fields": {
+        "close": {
+          "tencent": 5.55,
+          "sina": 5.65
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-07-23",
+      "fields": {
+        "high": {
+          "tencent": 5.55,
+          "sina": 5.5
+        },
+        "close": {
+          "tencent": 5.4,
+          "sina": 5.3
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-07-25",
+      "fields": {
+        "close": {
+          "tencent": 5.35,
+          "sina": 5.4
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-07-26",
+      "fields": {
+        "close": {
+          "tencent": 5.2,
+          "sina": 5.25
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-07-31",
+      "fields": {
+        "close": {
+          "tencent": 5.2,
+          "sina": 4.95
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-08-01",
+      "fields": {
+        "low": {
+          "tencent": 5.1,
+          "sina": 5.15
+        },
+        "close": {
+          "tencent": 5.3,
+          "sina": 5.15
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-08-12",
+      "fields": {
+        "open": {
+          "tencent": 5.15,
+          "sina": 5.1
+        },
+        "high": {
+          "tencent": 5.2,
+          "sina": 5.15
+        },
+        "low": {
+          "tencent": 5.1,
+          "sina": 5.05
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-09-24",
+      "fields": {
+        "low": {
+          "tencent": 4.45,
+          "sina": 4.5
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-10-28",
+      "fields": {
+        "open": {
+          "tencent": 8.0,
+          "sina": 7.95
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-11-27",
+      "fields": {
+        "open": {
+          "tencent": 11.8,
+          "sina": 11.5
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1991-12-19",
+      "fields": {
+        "open": {
+          "tencent": 11.25,
+          "sina": 11.3
+        },
+        "high": {
+          "tencent": 11.25,
+          "sina": 11.3
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1992-05-25",
+      "fields": {
+        "low": {
+          "tencent": 24.85,
+          "sina": 23.85
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1992-06-16",
+      "fields": {
+        "low": {
+          "tencent": 18.0,
+          "sina": 18.1
+        }
+      }
+    },
+    {
+      "symbol": "000002.SZ",
+      "trade_date": "1992-08-21",
+      "fields": {
+        "close": {
+          "tencent": 27.0,
+          "sina": 27.6
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="QSA">
+  <title>QSA</title>
+  <defs>
+    <linearGradient id="bg" x1="8" y1="4" x2="56" y2="60" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#111c2f"/>
+      <stop offset="1" stop-color="#070c16"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="12" y1="44" x2="52" y2="20" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#f59e0b"/>
+      <stop offset="1" stop-color="#fde68a"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="15" fill="url(#bg)"/>
+  <rect x="2.75" y="2.75" width="58.5" height="58.5" rx="14.25" fill="none" stroke="#ffffff" stroke-opacity=".09" stroke-width="1.5"/>
+  <g opacity=".22" stroke="#93c5fd" stroke-width=".8">
+    <path d="M10 20h44M10 32h44M10 44h44"/>
+    <path d="M20 12v40M32 12v40M44 12v40"/>
+  </g>
+  <g stroke-linecap="round">
+    <path d="M18 18v28" stroke="#34d399" stroke-width="2"/>
+    <rect x="14.5" y="25" width="7" height="13" rx="1.6" fill="#34d399"/>
+    <path d="M32 13v30" stroke="#f87171" stroke-width="2"/>
+    <rect x="28.5" y="21" width="7" height="15" rx="1.6" fill="#f87171"/>
+    <path d="M46 23v29" stroke="#34d399" stroke-width="2"/>
+    <rect x="42.5" y="31" width="7" height="14" rx="1.6" fill="#34d399"/>
+  </g>
+  <path d="M12 45l11-9 11 5 18-20" fill="none" stroke="url(#gold)" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="52" cy="21" r="3.2" fill="#fbbf24" stroke="#111c2f" stroke-width="1.5"/>
+</svg>

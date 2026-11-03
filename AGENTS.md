@@ -109,6 +109,7 @@ Linux/容器中使用 `.venv/bin/python`。Docker 相关命令在 Git Bash 下�
 - worker 使用 PostgreSQL advisory lock 和 `sync_requests` 队列（`FOR UPDATE SKIP LOCKED`）。重启 worker 前先检查是否有 running/queued 请求。
 - worker 日志：`worker_logs` 表（`models/worker_log.py`）由 `services/worker_logs.py` 的 `WorkerLogHandler` 异步落库（有界队列 + 1s/100 条批量写，启动只保留 20000 行 / 7 天，超长消息截断 4000 字符）；只捕获 `app.*` 的 INFO+ 和其它 logger 的 WARNING+，并通过 ContextVar `CURRENT_SYNC_REQUEST` 给手动同步请求打上 `request_id`。handler 只在 `worker.main()` 安装（pytest 不启动线程）。
 - 日志查询 API：`GET /api/admin/logs`（admin）支持 `level` / `request_id` / `q` / `after_id`（增量轮询）/ `before_id`（向前翻页）/ `limit≤500`，返回按 id 升序的 `{items, has_more}`；参数非法或 after/before 同传返回 422。前端在 `/admin/data`：活动请求卡片内「数据更新日志」每 2s 增量 tail，底部「Worker 日志」卡片提供级别/关键词/请求 ID 筛选、自动刷新与「加载更早」。
+- 数据修复：`python -m app.cli repair-adj-factors [--symbol 600299.SH ...] [--asset-type stock|etf|all] [--limit N] [--apply]`（默认 dry-run）扫描 `daily_bars.adj_factor`，把回退/缺失的因子按前向最大值补齐并重算 `close_adj`；K 线与指标是实时计算，修复后刷新网页即可，旧 PDF 缓存里的指标表不会自动变化。
 - API 与 worker 都设计为单副本：QQ 机器人 WebSocket、APScheduler 和队列消费者不能随意横向扩容。
 
 ## 前端约定

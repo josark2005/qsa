@@ -13,6 +13,7 @@ import app.models  # noqa: F401
 from app.core.config import get_config
 from app.core.db import Base, make_engine, make_session_factory
 from app.core.settings_service import SettingsService
+from app.services.adjustment_repair import repair_adjustment_factors
 from app.services.audit import add_audit
 from app.services.history_archive import (
     export_history,
@@ -459,6 +460,23 @@ def command_sync_limits(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_repair_adj_factors(args: argparse.Namespace) -> int:
+    engine, session_factory = _session_factory()
+    try:
+        with session_factory() as db:
+            result = repair_adjustment_factors(
+                db,
+                symbols=[item.strip().upper() for item in args.symbol] or None,
+                asset_type=args.asset_type,
+                limit=args.limit,
+                apply=args.apply,
+            )
+        _print(result)
+    finally:
+        engine.dispose()
+    return 0
+
+
 def command_export_history(args: argparse.Namespace) -> int:
     engine, session_factory = _session_factory()
     try:
@@ -594,6 +612,27 @@ def build_parser() -> argparse.ArgumentParser:
     limits.add_argument("--start", default=None)
     limits.add_argument("--end", default=None)
     limits.set_defaults(func=command_sync_limits)
+
+    repair = subparsers.add_parser(
+        "repair-adj-factors",
+        help="normalize regressed/missing adj_factor and recompute close_adj",
+    )
+    repair.add_argument(
+        "--symbol",
+        action="append",
+        default=[],
+        help="only repair these symbols (repeatable)",
+    )
+    repair.add_argument(
+        "--asset-type", choices=["stock", "etf", "all"], default="all"
+    )
+    repair.add_argument("--limit", type=int, default=None)
+    repair.add_argument(
+        "--apply",
+        action="store_true",
+        help="write the repaired factors (default is dry-run)",
+    )
+    repair.set_defaults(func=command_repair_adj_factors)
 
     export_history_parser = subparsers.add_parser(
         "export-history", help="export monthly SQLite history archives"

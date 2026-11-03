@@ -23,6 +23,62 @@ function line(name: string, data: Array<number | null>, color: string, width = 1
   }
 }
 
+function formatNumber(value: number | null | undefined, digits = 2): string {
+  if (value === null || value === undefined) return "—"
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return "—"
+  return numeric.toFixed(digits)
+}
+
+function formatPct(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) return "—"
+  return `${value > 0 ? "+" : ""}${value.toFixed(2)}%`
+}
+
+function formatVolume(value: number | null | undefined): string {
+  const numeric = Number(value ?? 0)
+  if (!Number.isFinite(numeric) || numeric <= 0) return "—"
+  if (numeric >= 1e8) return `${(numeric / 1e8).toFixed(2)} 亿`
+  if (numeric >= 1e4) return `${(numeric / 1e4).toFixed(2)} 万`
+  return numeric.toFixed(0)
+}
+
+function tooltipFormatter(data: TechnicalPeriod) {
+  return (params: unknown): string => {
+    const items = Array.isArray(params) ? params : [params]
+    const first = items[0] as { dataIndex?: number } | undefined
+    const index = first?.dataIndex
+    if (typeof index !== "number" || index < 0) return ""
+    const bar = data.ohlc[index]
+    if (!bar) return ""
+    const [open, close, low, high] = bar
+    const prevClose = index > 0 ? data.ohlc[index - 1]?.[1] : null
+    const pct =
+      close !== null && prevClose
+        ? (Number(close) / Number(prevClose) - 1) * 100
+        : null
+    const pctColor = Number(pct ?? 0) >= 0 ? UP_COLOR : DOWN_COLOR
+    const ma = data.ma
+    const expma = data.expma
+    const macd = data.macd
+    const kdj = data.kdj
+    const rsi = data.rsi
+    const muted = 'style="color:#a1a1aa"'
+    return [
+      '<div style="font-size:11px;line-height:1.5">',
+      `<div style="font-weight:600;margin-bottom:3px">${data.dates[index] ?? ""}</div>`,
+      `<div>开 ${formatNumber(open)}　高 ${formatNumber(high)}　低 ${formatNumber(low)}　收 <b>${formatNumber(close)}</b>　<span style="color:${pctColor};font-weight:600">${formatPct(pct)}</span></div>`,
+      `<div ${muted}>量 ${formatVolume(data.volume[index])}</div>`,
+      `<div>MA 5/10/20：${formatNumber(ma.ma5[index])} / ${formatNumber(ma.ma10[index])} / ${formatNumber(ma.ma20[index])}</div>`,
+      `<div>EXPMA 20/50：${formatNumber(expma.expma20[index])} / ${formatNumber(expma.expma50[index])}</div>`,
+      `<div>MACD：DIF ${formatNumber(macd.dif[index])}　DEA ${formatNumber(macd.dea[index])}　柱 ${formatNumber(macd.hist[index])}</div>`,
+      `<div>KDJ：${formatNumber(kdj.k[index])} / ${formatNumber(kdj.d[index])} / ${formatNumber(kdj.j[index])}</div>`,
+      `<div>RSI：${formatNumber(rsi.rsi6[index])} / ${formatNumber(rsi.rsi12[index])} / ${formatNumber(rsi.rsi24[index])}</div>`,
+      "</div>",
+    ].join("")
+  }
+}
+
 function slicePeriod(data: TechnicalPeriod, maxBars: number): TechnicalPeriod {
   const size = data.dates.length
   if (!maxBars || maxBars <= 0 || size <= maxBars) return data
@@ -144,10 +200,15 @@ function buildOption(
     axisPointer: { link: [{ xAxisIndex: "all" }], label: { backgroundColor: "#52525b" } },
     tooltip: {
       trigger: "axis",
+      // 浮层限制在图表区域内，避免在弹窗顶部被裁掉上半部分。
+      confine: true,
       axisPointer: { type: "cross" },
       borderWidth: 0,
-      backgroundColor: "rgba(24,24,27,0.92)",
+      backgroundColor: "rgba(24,24,27,0.94)",
       textStyle: { color: "#fafafa", fontSize: 11 },
+      extraCssText:
+        "border-radius:6px;padding:6px 8px;box-shadow:0 6px 18px rgba(0,0,0,0.28);max-width:340px;white-space:normal;",
+      formatter: tooltipFormatter(data),
     },
     grid: [
       { left: GRID_LEFT, right: GRID_RIGHT, top: layout.top, height: layout.priceHeight },

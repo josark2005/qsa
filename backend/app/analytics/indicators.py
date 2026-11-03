@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 from datetime import date
 from typing import Any
@@ -11,6 +12,8 @@ from sqlalchemy.orm import Session
 
 from app.models.daily_bar import DailyBar
 from app.models.instrument import Instrument
+
+logger = logging.getLogger(__name__)
 
 INDICATOR_PARAMS = {
     "ma": [5, 10, 20],
@@ -233,6 +236,35 @@ def _empty_payload(
     }
 
 
+def _front_adjust_ratio(frame: pd.DataFrame, *, symbol: str) -> pd.Series:
+    """返回前复权系数（每行 * 原始价格 = 展示价格），最后一行系数固定为 1。
+
+    QSA 的 adj_factor 来自 BaoStock backAdjustFactor（后复权因子，随分红送转
+    单调不减）。历史归档与腾讯/AkShare 增量数据混写时，可能出现最新一根 K 线
+    的 adj_factor 回退（例如旧数据 2.42、新数据 1.0）；若直接按“最新因子”
+    归一化，旧数据会被整体放大，制造出单日 -58% 的假跌。检测到因子序列回退
+    时放弃复权（系数恒为 1），用原始价格展示，并记录一条 warning 便于排查。
+    """
+    factors = pd.to_numeric(frame["adj_factor"], errors="coerce")
+    latest = factors.dropna()
+    latest_value = float(latest.iloc[-1]) if not latest.empty else 1.0
+    if latest_value <= 0:
+        latest_value = 1.0
+    normalized = factors.fillna(latest_value).replace(0, latest_value)
+    diffs = normalized.diff().dropna()
+    tolerance = max(abs(float(normalized.max())) * 1e-6, 1e-9)
+    if (diffs < -tolerance).any():
+        logger.warning(
+            "adjustment factor series is inconsistent for %s "
+            "(latest=%.4f, min=%.4f); using raw prices",
+            symbol,
+            latest_value,
+            float(normalized.min()),
+        )
+        return pd.Series(1.0, index=frame.index)
+    return normalized / latest_value
+
+
 def build_technical_payload(
     db: Session,
     instrument: Instrument,
@@ -270,12 +302,7 @@ def build_technical_payload(
             message="暂无有效日线数据",
         )
 
-    latest_factor = frame["adj_factor"].dropna()
-    latest_factor = float(latest_factor.iloc[-1]) if not latest_factor.empty else 1.0
-    if latest_factor <= 0:
-        latest_factor = 1.0
-    factor = frame["adj_factor"].fillna(latest_factor).replace(0, latest_factor)
-    ratio = factor / latest_factor
+    ratio = _front_adjust_ratio(frame, symbol=instrument.symbol)
     for column in ("open", "high", "low", "close"):
         frame[column] = frame[column] * ratio
     frame = frame.dropna(subset=["open", "high", "low", "close"])

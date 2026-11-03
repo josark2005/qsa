@@ -95,6 +95,8 @@ Linux/容器中使用 `.venv/bin/python`。Docker 相关命令在 Git Bash 下�
 - 详情 Dialog 的技术图固定只画最近 20 根 K 线并关闭 dataZoom（`StockTechnicalChart` 的 `maxBars`/`enableZoom`），指标仍按完整历史计算；TrendsPage 仍用完整历史 + 缩放。
 - 详情图高度按窗口自适应（`computeChartHeight`，弹窗 95vh），K 线 + 成交量 + MACD/KDJ/RSI 一屏展示、不滚动；`StockTechnicalChart` 的 `height` 参数会按比例重排 5 个子图与标题位置。
 - 缩略图数据来自 `GET /api/public/reports/{token}/thumbnails?symbols=...`（`services/report_thumbnails.py`）：每页一次批量请求，最多 60 个代码、每标的最近 30 根日线，前复权（`close_adj/close`），只返回报表内的标的。
+- K 线前复权在 `analytics/indicators.py` 统一计算：`adj_factor`（BaoStock backAdjustFactor，后复权因子）应单调不减；历史归档与增量数据混写导致因子回退时自动退回原始价格并记录 warning，避免出现单日 -58% 的假跌。排查这类问题时先看该标的 `daily_bars.adj_factor` 是否一致。
+- 图表 tooltip 使用 `StockTechnicalChart` 内的聚合 formatter（日期 / 开高低收 / 成交量 / MA / EXPMA / MACD / KDJ / RSI 各一行）并设置 `confine: true`，避免弹窗顶部被裁切。
 - 容器内依赖 `fonts-noto-cjk` 生成中文 PDF（matplotlib 已不用于 PDF，依赖暂时保留）；不要移除字体。
 
 ## 同步与数据源

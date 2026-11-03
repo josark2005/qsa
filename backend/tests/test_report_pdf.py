@@ -93,9 +93,11 @@ def test_large_report_pdf_has_summary_only(monkeypatch, tmp_path) -> None:
     assert len(reader.pages) < 5
     assert all(not page.images for page in reader.pages)
     text = "".join(page.extract_text() or "" for page in reader.pages)
-    assert "入选标的汇总" in text
-    assert "仅包含汇总表" in text
-    assert report_pdf.DETAIL_CHART_NOTE not in text
+    # 不依赖中文字体（CI 环境没有 CJK 字体，CID 回退字体无法被 pypdf 抽出中文），
+    # 用 ASCII 标的代码与技术指标表头判断内容。
+    assert "600000.SH" in text
+    assert "600059.SH" in text
+    assert "MA5/10/20" not in text
 
 
 def test_small_report_pdf_has_compact_detail_pages(monkeypatch, tmp_path) -> None:
@@ -116,12 +118,17 @@ def test_small_report_pdf_has_compact_detail_pages(monkeypatch, tmp_path) -> Non
     assert all(not page.images for page in reader.pages)
 
     texts = [page.extract_text() or "" for page in reader.pages]
-    assert "入选标的汇总" in texts[0]
+    # 汇总页包含全部 7 个标的代码（ASCII，可在无 CJK 字体环境下提取）。
+    assert "600000.SH" in texts[0]
+    assert "600006.SH" in texts[0]
     for page_index, start in ((1, 0), (2, 3), (3, 6)):
         page_text = texts[page_index]
-        expected = [f"测试{index}" for index in range(start, min(start + 3, len(rows)))]
-        for name in expected:
-            assert name in page_text
-        assert page_text.count(report_pdf.DETAIL_CHART_NOTE) == len(expected)
-    assert "测试3" not in texts[1]
-    assert "测试6" not in texts[2]
+        expected = [f"600{index:03d}.SH" for index in range(start, min(start + 3, len(rows)))]
+        for symbol in expected:
+            assert symbol in page_text
+        # 每个详情块恰好有一行技术指标表。
+        assert page_text.count("MA5/10/20") == len(expected)
+    for symbol in ("600003.SH", "600004.SH", "600005.SH"):
+        assert symbol not in texts[1]
+    for symbol in ("600000.SH", "600001.SH", "600002.SH"):
+        assert symbol not in texts[2]

@@ -34,6 +34,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Skeleton } from "@/components/ui/skeleton"
+import { Switch } from "@/components/ui/switch"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { api } from "@/lib/api"
 import { formatDateTime, formatFactorValue, pctTone } from "@/lib/format"
@@ -48,6 +49,7 @@ const BOARD_LABELS: Record<string, string> = {
 }
 const PERIOD_LABELS = { daily: "日线", weekly: "周线", monthly: "月线" } as const
 const TREND_STORAGE_KEY = "qsa.report.showTrend"
+const INDICATOR_STORAGE_KEY = "qsa.report.showIndicators"
 const CHART_BARS = 20
 
 function computeChartHeight(): number {
@@ -65,6 +67,14 @@ function numberText(value: number | null | undefined, digits = 2): string {
   return value.toFixed(digits)
 }
 
+
+function formatVolume(value: number | null | undefined): string {
+  const numeric = Number(value ?? 0)
+  if (!Number.isFinite(numeric) || numeric <= 0) return "—"
+  if (numeric >= 1e8) return `${(numeric / 1e8).toFixed(2)} 亿`
+  if (numeric >= 1e4) return `${(numeric / 1e4).toFixed(2)} 万`
+  return numeric.toFixed(0)
+}
 function MetricCard({
   label,
   value,
@@ -100,6 +110,14 @@ function readTrendPreference(): boolean {
   }
 }
 
+function readIndicatorPreference(): boolean {
+  try {
+    return window.localStorage.getItem(INDICATOR_STORAGE_KEY) === "1"
+  } catch {
+    return false
+  }
+}
+
 export function ReportPage() {
   const { token = "" } = useParams()
   const navigate = useNavigate()
@@ -107,6 +125,7 @@ export function ReportPage() {
   const [detailSymbol, setDetailSymbol] = useState<string | null>(null)
   const [period, setPeriod] = useState<keyof typeof PERIOD_LABELS>("daily")
   const [showTrend, setShowTrend] = useState<boolean>(readTrendPreference)
+  const [showIndicators, setShowIndicators] = useState<boolean>(readIndicatorPreference)
   const [visibleSymbols, setVisibleSymbols] = useState<string[]>([])
   const [chartHeight, setChartHeight] = useState<number>(computeChartHeight)
 
@@ -140,6 +159,14 @@ export function ReportPage() {
       // localStorage 不可用时仅本次会话生效
     }
   }, [showTrend])
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(INDICATOR_STORAGE_KEY, showIndicators ? "1" : "0")
+    } catch {
+      // localStorage 不可用时仅本次会话生效
+    }
+  }, [showIndicators])
 
   useEffect(() => {
     const onResize = () => setChartHeight(computeChartHeight())
@@ -401,8 +428,8 @@ export function ReportPage() {
                 {report.stale ? <Badge variant="destructive">历史报表</Badge> : null}
               </DialogTitle>
               <DialogDescription>
-                前复权 K 线，仅展示最近 {CHART_BARS} 个交易日；指标按完整历史计算
-                （MA5/10/20、EXPMA(20,50)、MACD(12,26,9)、KDJ(9,3,3)、RSI(6,12,24)）
+                前复权 K 线，仅展示最近 {CHART_BARS} 个交易日；默认只显示 K 线与成交量。
+                开启「技术指标」后显示 MA5/10/20、EXPMA(20,50)、MACD(12,26,9)、KDJ(9,3,3)、RSI(6,12,24)（按完整历史计算）。
               </DialogDescription>
             </DialogHeader>
 
@@ -433,6 +460,16 @@ export function ReportPage() {
               </TabsList>
             </Tabs>
 
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-xs font-medium text-muted-foreground">技术指标</span>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-muted-foreground">
+                  {showIndicators ? "显示" : "隐藏"}
+                </span>
+                <Switch checked={showIndicators} onCheckedChange={setShowIndicators} />
+              </div>
+            </div>
+
             {technicalQuery.isLoading ? (
               <div className="flex flex-col gap-2">
                 <Skeleton className="h-16 w-full" />
@@ -449,7 +486,7 @@ export function ReportPage() {
               </Alert>
             ) : periodData && periodData.latest ? (
               <div className="flex flex-col gap-3">
-                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-8">
+                <div className={cn("grid grid-cols-2 gap-2 sm:grid-cols-4", showIndicators && "lg:grid-cols-8")}>
                   <MetricCard
                     label="收盘"
                     value={numberText(periodData.latest.close)}
@@ -459,6 +496,12 @@ export function ReportPage() {
                     value={`${numberText(periodData.latest.pct_chg)}%`}
                     tone={(periodData.latest.pct_chg ?? 0) >= 0 ? "up" : "down"}
                   />
+                  <MetricCard
+                    label="成交量"
+                    value={formatVolume(periodData.volume[periodData.volume.length - 1])}
+                  />
+                  {showIndicators ? (
+                    <>
                   <MetricCard
                     label="MACD 柱"
                     value={numberText(periodData.latest.macd.hist, 3)}
@@ -479,12 +522,14 @@ export function ReportPage() {
                     label="RSI6 / 12 / 24"
                     value={`${numberText(periodData.latest.rsi.rsi6)} / ${numberText(periodData.latest.rsi.rsi12)} / ${numberText(periodData.latest.rsi.rsi24)}`}
                   />
+                    </>
+                  ) : null}
                   <MetricCard
                     label="周期数 / 截止"
                     value={`${periodData.bar_count} · ${periodData.latest.trade_date}`}
                   />
                 </div>
-                {periodData.limited_history ? (
+                {periodData.limited_history && showIndicators ? (
                   <Alert>
                     <AlertTriangle className="size-4" />
                     <AlertDescription>
@@ -500,6 +545,7 @@ export function ReportPage() {
                       height={chartHeight}
                       maxBars={CHART_BARS}
                       period={period}
+                      showIndicators={showIndicators}
                     />
                   </CardContent>
                 </Card>

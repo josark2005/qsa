@@ -43,7 +43,7 @@ function formatVolume(value: number | null | undefined): string {
   return numeric.toFixed(0)
 }
 
-function tooltipFormatter(data: TechnicalPeriod) {
+function tooltipFormatter(data: TechnicalPeriod, showIndicators: boolean) {
   return (params: unknown): string => {
     const items = Array.isArray(params) ? params : [params]
     const first = items[0] as { dataIndex?: number } | undefined
@@ -58,24 +58,24 @@ function tooltipFormatter(data: TechnicalPeriod) {
         ? (Number(close) / Number(prevClose) - 1) * 100
         : null
     const pctColor = Number(pct ?? 0) >= 0 ? UP_COLOR : DOWN_COLOR
-    const ma = data.ma
-    const expma = data.expma
-    const macd = data.macd
-    const kdj = data.kdj
-    const rsi = data.rsi
     const muted = 'style="color:#a1a1aa"'
-    return [
+    const rows = [
       '<div style="font-size:11px;line-height:1.5">',
       `<div style="font-weight:600;margin-bottom:3px">${data.dates[index] ?? ""}</div>`,
       `<div>开 ${formatNumber(open)}　高 ${formatNumber(high)}　低 ${formatNumber(low)}　收 <b>${formatNumber(close)}</b>　<span style="color:${pctColor};font-weight:600">${formatPct(pct)}</span></div>`,
       `<div ${muted}>量 ${formatVolume(data.volume[index])}</div>`,
-      `<div>MA 5/10/20：${formatNumber(ma.ma5[index])} / ${formatNumber(ma.ma10[index])} / ${formatNumber(ma.ma20[index])}</div>`,
-      `<div>EXPMA 20/50：${formatNumber(expma.expma20[index])} / ${formatNumber(expma.expma50[index])}</div>`,
-      `<div>MACD：DIF ${formatNumber(macd.dif[index])}　DEA ${formatNumber(macd.dea[index])}　柱 ${formatNumber(macd.hist[index])}</div>`,
-      `<div>KDJ：${formatNumber(kdj.k[index])} / ${formatNumber(kdj.d[index])} / ${formatNumber(kdj.j[index])}</div>`,
-      `<div>RSI：${formatNumber(rsi.rsi6[index])} / ${formatNumber(rsi.rsi12[index])} / ${formatNumber(rsi.rsi24[index])}</div>`,
-      "</div>",
-    ].join("")
+    ]
+    if (showIndicators) {
+      rows.push(
+        `<div>MA 5/10/20：${formatNumber(data.ma.ma5[index])} / ${formatNumber(data.ma.ma10[index])} / ${formatNumber(data.ma.ma20[index])}</div>`,
+        `<div>EXPMA 20/50：${formatNumber(data.expma.expma20[index])} / ${formatNumber(data.expma.expma50[index])}</div>`,
+        `<div>MACD：DIF ${formatNumber(data.macd.dif[index])}　DEA ${formatNumber(data.macd.dea[index])}　柱 ${formatNumber(data.macd.hist[index])}</div>`,
+        `<div>KDJ：${formatNumber(data.kdj.k[index])} / ${formatNumber(data.kdj.d[index])} / ${formatNumber(data.kdj.j[index])}</div>`,
+        `<div>RSI：${formatNumber(data.rsi.rsi6[index])} / ${formatNumber(data.rsi.rsi12[index])} / ${formatNumber(data.rsi.rsi24[index])}</div>`,
+      )
+    }
+    rows.push("</div>")
+    return rows.join("")
   }
 }
 
@@ -116,12 +116,28 @@ function slicePeriod(data: TechnicalPeriod, maxBars: number): TechnicalPeriod {
   }
 }
 
-function computeChartLayout(height: number) {
+function computeChartLayout(height: number, showIndicators: boolean) {
   const top = 22
   // 底部留出旋转后的日期标签空间，避免标签被裁掉。
   const footer = 30
   const priceGap = 14
   const indicatorGap = 24
+  if (!showIndicators) {
+    const available = Math.max(220, height - top - footer - priceGap)
+    const unit = available / 5
+    const priceHeight = Math.round(unit * 4)
+    const volumeHeight = Math.round(unit)
+    return {
+      top,
+      priceHeight,
+      volumeTop: top + priceHeight + priceGap,
+      volumeHeight,
+      macdTop: 0,
+      kdjTop: 0,
+      rsiTop: 0,
+      indicatorHeight: 0,
+    }
+  }
   const available = Math.max(280, height - top - footer - priceGap - indicatorGap * 3)
   const unit = available / 8
   const priceHeight = Math.round(unit * 4)
@@ -149,9 +165,10 @@ function buildOption(
   maxBars: number | undefined,
   enableZoom: boolean,
   height: number,
+  showIndicators: boolean,
 ): EChartsOption {
   const data = maxBars ? slicePeriod(source, maxBars) : source
-  const layout = computeChartLayout(height)
+  const layout = computeChartLayout(height, showIndicators)
   const volumeData = data.volume.map((value, index) => {
     const bar = data.ohlc[index]
     const bullish = bar ? Number(bar[1]) >= Number(bar[0]) : true
@@ -164,40 +181,125 @@ function buildOption(
     value,
     itemStyle: { color: Number(value) >= 0 ? UP_COLOR : DOWN_COLOR },
   }))
-  const xAxisIndexes = [0, 1, 2, 3, 4]
+  const xAxisIndexes = showIndicators ? [0, 1, 2, 3, 4] : [0, 1]
+
+  const priceGrid = {
+    left: GRID_LEFT,
+    right: GRID_RIGHT,
+    top: layout.top,
+    height: layout.priceHeight,
+  }
+  const volumeGrid = {
+    left: GRID_LEFT,
+    right: GRID_RIGHT,
+    top: layout.volumeTop,
+    height: layout.volumeHeight,
+  }
+  const grids = showIndicators
+    ? [
+        priceGrid,
+        volumeGrid,
+        {
+          left: GRID_LEFT,
+          right: GRID_RIGHT,
+          top: layout.macdTop,
+          height: layout.indicatorHeight,
+        },
+        {
+          left: GRID_LEFT,
+          right: GRID_RIGHT,
+          top: layout.kdjTop,
+          height: layout.indicatorHeight,
+        },
+        {
+          left: GRID_LEFT,
+          right: GRID_RIGHT,
+          top: layout.rsiTop,
+          height: layout.indicatorHeight,
+        },
+      ]
+    : [priceGrid, volumeGrid]
+
+  const priceYAxis = {
+    scale: true,
+    gridIndex: 0,
+    splitNumber: 4,
+    axisLabel: { fontSize: 10, color: "#71717a" },
+    splitLine: { lineStyle: { color: "#f4f4f5" } },
+  }
+  const volumeYAxis = {
+    scale: true,
+    gridIndex: 1,
+    splitNumber: 2,
+    axisLabel: { show: false },
+    splitLine: { show: false },
+  }
+  const yAxes = showIndicators
+    ? [
+        priceYAxis,
+        volumeYAxis,
+        {
+          scale: true,
+          gridIndex: 2,
+          splitNumber: 2,
+          axisLabel: { fontSize: 9, color: "#a1a1aa" },
+          splitLine: { lineStyle: { color: "#f4f4f5" } },
+        },
+        {
+          scale: true,
+          gridIndex: 3,
+          splitNumber: 2,
+          axisLabel: { fontSize: 9, color: "#a1a1aa" },
+          splitLine: { lineStyle: { color: "#f4f4f5" } },
+        },
+        {
+          scale: true,
+          gridIndex: 4,
+          splitNumber: 2,
+          min: 0,
+          max: 100,
+          axisLabel: { fontSize: 9, color: "#a1a1aa" },
+          splitLine: { lineStyle: { color: "#f4f4f5" } },
+        },
+      ]
+    : [priceYAxis, volumeYAxis]
 
   return {
     animation: false,
     backgroundColor: "transparent",
-    legend: {
-      top: 2,
-      left: GRID_LEFT,
-      itemWidth: 12,
-      itemHeight: 2,
-      textStyle: { fontSize: 10, color: "#71717a" },
-      data: ["MA5", "MA10", "MA20", "EXPMA20", "EXPMA50"],
-    },
-    title: [
-      {
-        text: "MACD(12,26,9)",
-        left: GRID_LEFT,
-        top: Math.max(0, layout.macdTop - 16),
-        textStyle: { fontSize: 10, fontWeight: "normal", color: "#71717a" },
-      },
-      {
-        text: "KDJ(9,3,3)",
-        left: GRID_LEFT,
-        top: Math.max(0, layout.kdjTop - 16),
-        textStyle: { fontSize: 10, fontWeight: "normal", color: "#71717a" },
-      },
-      {
-        text: "RSI(6,12,24)",
-        left: GRID_LEFT,
-        top: Math.max(0, layout.rsiTop - 16),
-        textStyle: { fontSize: 10, fontWeight: "normal", color: "#71717a" },
-      },
-    ],
-    axisPointer: { link: [{ xAxisIndex: "all" }], label: { backgroundColor: "#52525b" } },
+    legend: showIndicators
+      ? {
+          top: 2,
+          left: GRID_LEFT,
+          itemWidth: 12,
+          itemHeight: 2,
+          textStyle: { fontSize: 10, color: "#71717a" },
+          data: ["MA5", "MA10", "MA20", "EXPMA20", "EXPMA50"],
+        }
+      : { show: false },
+    title: showIndicators
+      ? [
+          {
+            text: "MACD(12,26,9)",
+            left: GRID_LEFT,
+            top: Math.max(0, layout.macdTop - 16),
+            textStyle: { fontSize: 10, fontWeight: "normal", color: "#71717a" },
+          },
+          {
+            text: "KDJ(9,3,3)",
+            left: GRID_LEFT,
+            top: Math.max(0, layout.kdjTop - 16),
+            textStyle: { fontSize: 10, fontWeight: "normal", color: "#71717a" },
+          },
+          {
+            text: "RSI(6,12,24)",
+            left: GRID_LEFT,
+            top: Math.max(0, layout.rsiTop - 16),
+            textStyle: { fontSize: 10, fontWeight: "normal", color: "#71717a" },
+          },
+        ]
+      : [],
+    axisPointer: { link: [{ xAxisIndex: xAxisIndexes }], label: { backgroundColor: "#52525b" } },
     tooltip: {
       trigger: "axis",
       // 浮层限制在图表区域内，避免在弹窗顶部被裁掉上半部分。
@@ -208,35 +310,9 @@ function buildOption(
       textStyle: { color: "#fafafa", fontSize: 11 },
       extraCssText:
         "border-radius:6px;padding:6px 8px;box-shadow:0 6px 18px rgba(0,0,0,0.28);max-width:340px;white-space:normal;",
-      formatter: tooltipFormatter(data),
+      formatter: tooltipFormatter(data, showIndicators),
     },
-    grid: [
-      { left: GRID_LEFT, right: GRID_RIGHT, top: layout.top, height: layout.priceHeight },
-      {
-        left: GRID_LEFT,
-        right: GRID_RIGHT,
-        top: layout.volumeTop,
-        height: layout.volumeHeight,
-      },
-      {
-        left: GRID_LEFT,
-        right: GRID_RIGHT,
-        top: layout.macdTop,
-        height: layout.indicatorHeight,
-      },
-      {
-        left: GRID_LEFT,
-        right: GRID_RIGHT,
-        top: layout.kdjTop,
-        height: layout.indicatorHeight,
-      },
-      {
-        left: GRID_LEFT,
-        right: GRID_RIGHT,
-        top: layout.rsiTop,
-        height: layout.indicatorHeight,
-      },
-    ],
+    grid: grids,
     xAxis: xAxisIndexes.map((index) => ({
       type: "category",
       gridIndex: index,
@@ -245,7 +321,7 @@ function buildOption(
       axisLine: { lineStyle: { color: "#e4e4e7" } },
       axisTick: { show: false },
       axisLabel: {
-        show: index === 4,
+        show: index === xAxisIndexes.length - 1,
         fontSize: maxBars ? 9 : 10,
         color: "#71717a",
         rotate: maxBars ? 45 : 0,
@@ -256,45 +332,7 @@ function buildOption(
       min: "dataMin",
       max: "dataMax",
     })),
-    yAxis: [
-      {
-        scale: true,
-        gridIndex: 0,
-        splitNumber: 4,
-        axisLabel: { fontSize: 10, color: "#71717a" },
-        splitLine: { lineStyle: { color: "#f4f4f5" } },
-      },
-      {
-        scale: true,
-        gridIndex: 1,
-        splitNumber: 2,
-        axisLabel: { show: false },
-        splitLine: { show: false },
-      },
-      {
-        scale: true,
-        gridIndex: 2,
-        splitNumber: 2,
-        axisLabel: { fontSize: 9, color: "#a1a1aa" },
-        splitLine: { lineStyle: { color: "#f4f4f5" } },
-      },
-      {
-        scale: true,
-        gridIndex: 3,
-        splitNumber: 2,
-        axisLabel: { fontSize: 9, color: "#a1a1aa" },
-        splitLine: { lineStyle: { color: "#f4f4f5" } },
-      },
-      {
-        scale: true,
-        gridIndex: 4,
-        splitNumber: 2,
-        min: 0,
-        max: 100,
-        axisLabel: { fontSize: 9, color: "#a1a1aa" },
-        splitLine: { lineStyle: { color: "#f4f4f5" } },
-      },
-    ],
+    yAxis: yAxes,
     dataZoom: enableZoom
       ? [
           {
@@ -329,36 +367,44 @@ function buildOption(
           borderColor0: DOWN_COLOR,
         },
       },
-      line("MA5", data.ma.ma5, "#f59e0b"),
-      line("MA10", data.ma.ma10, "#3b82f6"),
-      line("MA20", data.ma.ma20, "#a855f7"),
-      line("EXPMA20", data.expma.expma20, "#ec4899", 1.4),
-      line("EXPMA50", data.expma.expma50, "#14b8a6", 1.4),
+      ...(showIndicators
+        ? [
+            line("MA5", data.ma.ma5, "#f59e0b"),
+            line("MA10", data.ma.ma10, "#3b82f6"),
+            line("MA20", data.ma.ma20, "#a855f7"),
+            line("EXPMA20", data.expma.expma20, "#ec4899", 1.4),
+            line("EXPMA50", data.expma.expma50, "#14b8a6", 1.4),
+          ]
+        : []),
       {
         name: "成交量",
-        type: "bar",
+        type: "bar" as const,
         xAxisIndex: 1,
         yAxisIndex: 1,
         data: volumeData,
         barWidth: "60%",
         itemStyle: { borderRadius: [1, 1, 0, 0] },
       },
-      {
-        name: "MACD柱",
-        type: "bar",
-        xAxisIndex: 2,
-        yAxisIndex: 2,
-        data: histData,
-        barWidth: "55%",
-      },
-      { ...line("DIF", data.macd.dif, "#f59e0b"), xAxisIndex: 2, yAxisIndex: 2 },
-      { ...line("DEA", data.macd.dea, "#3b82f6"), xAxisIndex: 2, yAxisIndex: 2 },
-      { ...line("K", data.kdj.k, "#f59e0b"), xAxisIndex: 3, yAxisIndex: 3 },
-      { ...line("D", data.kdj.d, "#3b82f6"), xAxisIndex: 3, yAxisIndex: 3 },
-      { ...line("J", data.kdj.j, "#a855f7"), xAxisIndex: 3, yAxisIndex: 3 },
-      { ...line("RSI6", data.rsi.rsi6, "#f59e0b"), xAxisIndex: 4, yAxisIndex: 4 },
-      { ...line("RSI12", data.rsi.rsi12, "#3b82f6"), xAxisIndex: 4, yAxisIndex: 4 },
-      { ...line("RSI24", data.rsi.rsi24, "#a855f7"), xAxisIndex: 4, yAxisIndex: 4 },
+      ...(showIndicators
+        ? [
+            {
+              name: "MACD柱",
+              type: "bar" as const,
+              xAxisIndex: 2,
+              yAxisIndex: 2,
+              data: histData,
+              barWidth: "55%",
+            },
+            { ...line("DIF", data.macd.dif, "#f59e0b"), xAxisIndex: 2, yAxisIndex: 2 },
+            { ...line("DEA", data.macd.dea, "#3b82f6"), xAxisIndex: 2, yAxisIndex: 2 },
+            { ...line("K", data.kdj.k, "#f59e0b"), xAxisIndex: 3, yAxisIndex: 3 },
+            { ...line("D", data.kdj.d, "#3b82f6"), xAxisIndex: 3, yAxisIndex: 3 },
+            { ...line("J", data.kdj.j, "#a855f7"), xAxisIndex: 3, yAxisIndex: 3 },
+            { ...line("RSI6", data.rsi.rsi6, "#f59e0b"), xAxisIndex: 4, yAxisIndex: 4 },
+            { ...line("RSI12", data.rsi.rsi12, "#3b82f6"), xAxisIndex: 4, yAxisIndex: 4 },
+            { ...line("RSI24", data.rsi.rsi24, "#a855f7"), xAxisIndex: 4, yAxisIndex: 4 },
+          ]
+        : []),
     ],
   }
 }
@@ -369,6 +415,7 @@ export function StockTechnicalChart({
   maxBars,
   enableZoom = true,
   height = 750,
+  showIndicators = true,
 }: {
   data: TechnicalPeriod
   period: string
@@ -376,8 +423,10 @@ export function StockTechnicalChart({
   maxBars?: number
   /** 是否显示 dataZoom 缩放条；只看固定窗口时关闭。 */
   enableZoom?: boolean
-  /** 画布高度（像素），5 个子图按比例自适应。 */
+  /** 画布高度（像素），子图按比例自适应。 */
   height?: number
+  /** 是否显示技术指标；false 时只保留 K 线 + 成交量。 */
+  showIndicators?: boolean
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -389,7 +438,17 @@ export function StockTechnicalChart({
     void import("echarts").then((echarts) => {
       if (disposed || !containerRef.current) return
       chart = echarts.init(containerRef.current, undefined, { renderer: "canvas" })
-      chart.setOption(buildOption(data, period, maxBars, enableZoom, height), true)
+      chart.setOption(
+        buildOption(
+          data,
+          period,
+          maxBars,
+          enableZoom,
+          height,
+          showIndicators,
+        ),
+        true,
+      )
       observer = new ResizeObserver(() => chart?.resize())
       observer.observe(containerRef.current)
     })
@@ -399,7 +458,7 @@ export function StockTechnicalChart({
       observer?.disconnect()
       chart?.dispose()
     }
-  }, [data, period, maxBars, enableZoom, height])
+  }, [data, period, maxBars, enableZoom, height, showIndicators])
 
   return (
     <div className={cn("w-full", !maxBars && "overflow-x-auto")}>

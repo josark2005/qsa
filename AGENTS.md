@@ -11,7 +11,7 @@ QSA 是一个前后端分离的条件筛选系统：FastAPI + PostgreSQL + Redis
 - `backend/app/services/`：报表、用户、会话、历史归档、PDF 等业务逻辑。
 - `backend/app/sync/`：行情/财报/股东同步、涨跌停重算、pipeline、全量回补。
 - `backend/app/screening/`：因子注册表 `registry.py`、SQL 构建 `query_builder.py`。
-- `backend/app/qq_bot/`：QQ WebSocket、会话式选股、群订阅。
+- `backend/app/qq_bot/`：QQ 机器人（官方 qq-botpy SDK）、会话式选股、群订阅。
 - `backend/migrations/versions/`：Alembic 迁移；以 `alembic heads` 为准，当前为 `b2d4e6f8a0c1`。
 - `frontend/src/pages/`：页面；`components/`：布局与业务组件；`lib/api.ts`、`lib/types.ts`：API 契约。
 - `data/history/`：1990 至今的月度 SQLite 归档；`data/reports/`：PDF 缓存；`data/bootstrap/`：部署用数据库 dump。
@@ -92,8 +92,8 @@ Linux/容器中使用 `.venv/bin/python`。Docker 相关命令在 Git Bash 下�
 - 修改 PDF 模板/表头后要提升 `report_pdf.py` 的 `PDF_CACHE_VERSION`，否则旧缓存仍会被返回。
 - PDF 不生成个股 K 线/趋势图：详情页只有指标表（每页最多 3 只）。K 线图在网页报表里看：表格的「走势」列是近 20 个交易日 SVG 缩略图（可用「走势」开关关闭，偏好存 localStorage），点行打开详情 Dialog（日/周/月线 + 技术指标）。
 - 网页报表表格是 shadcn DataTable（@tanstack/react-table）：支持名称/代码搜索、板块筛选、点击表头排序（数值列首次点击升序）、重置与分页；新增交互优先复用 shadcn/ui 组件。
-- 详情 Dialog 的技术图固定只画最近 20 根 K 线并关闭 dataZoom（`StockTechnicalChart` 的 `maxBars`/`enableZoom`），指标仍按完整历史计算；TrendsPage 仍用完整历史 + 缩放。
-- 详情图高度按窗口自适应（`computeChartHeight`，弹窗 95vh），K 线 + 成交量 + MACD/KDJ/RSI 一屏展示、不滚动；`StockTechnicalChart` 的 `height` 参数会按比例重排 5 个子图与标题位置。
+- 详情 Dialog 的技术图固定只画最近 20 根 K 线并关闭 dataZoom（`StockTechnicalChart` 的 `maxBars`/`enableZoom`）；默认只显示 K 线 + 成交量，开启「技术指标」开关后才显示 MA/EXPMA/MACD/KDJ/RSI（指标仍按完整历史计算）；TrendsPage 仍用完整历史 + 缩放并默认显示全部指标。
+- 详情图高度按窗口自适应（`computeChartHeight`，弹窗 95vh），显示全部指标时 5 个子图一屏展示、不滚动；隐藏指标时只保留 K 线 + 成交量两个子图。`StockTechnicalChart` 的 `height` 参数会按比例重排子图与标题位置。
 - 缩略图数据来自 `GET /api/public/reports/{token}/thumbnails?symbols=...`（`services/report_thumbnails.py`）：每页一次批量请求，最多 60 个代码、每标的最近 30 根日线，前复权（`close_adj/close`），只返回报表内的标的。
 - K 线前复权在 `analytics/indicators.py` 统一计算：`adj_factor`（BaoStock backAdjustFactor，后复权因子）应单调不减；历史归档与增量数据混写导致因子回退时自动退回原始价格并记录 warning，避免出现单日 -58% 的假跌。排查这类问题时先看该标的 `daily_bars.adj_factor` 是否一致。
 - 图表 tooltip 使用 `StockTechnicalChart` 内的聚合 formatter（日期 / 开高低收 / 成交量 / MA / EXPMA / MACD / KDJ / RSI 各一行）并设置 `confine: true`，避免弹窗顶部被裁切。
@@ -109,7 +109,7 @@ Linux/容器中使用 `.venv/bin/python`。Docker 相关命令在 Git Bash 下�
 - worker 使用 PostgreSQL advisory lock 和 `sync_requests` 队列（`FOR UPDATE SKIP LOCKED`）。重启 worker 前先检查是否有 running/queued 请求。
 - worker 日志：`worker_logs` 表（`models/worker_log.py`）由 `services/worker_logs.py` 的 `WorkerLogHandler` 异步落库（有界队列 + 1s/100 条批量写，启动只保留 20000 行 / 7 天，超长消息截断 4000 字符）；只捕获 `app.*` 的 INFO+ 和其它 logger 的 WARNING+，并通过 ContextVar `CURRENT_SYNC_REQUEST` 给手动同步请求打上 `request_id`。handler 只在 `worker.main()` 安装（pytest 不启动线程）。
 - 日志查询 API：`GET /api/admin/logs`（admin）支持 `level` / `request_id` / `q` / `after_id`（增量轮询）/ `before_id`（向前翻页）/ `limit≤500`，返回按 id 升序的 `{items, has_more}`；参数非法或 after/before 同传返回 422。前端在 `/admin/data`：活动请求卡片内「数据更新日志」每 2s 增量 tail，底部「Worker 日志」卡片提供级别/关键词/请求 ID 筛选、自动刷新与「加载更早」。
-- API 与 worker 都设计为单副本：QQ WebSocket、APScheduler 和队列消费者不能随意横向扩容。
+- API 与 worker 都设计为单副本：QQ 机器人 WebSocket、APScheduler 和队列消费者不能随意横向扩容。
 
 ## 前端约定
 
@@ -150,6 +150,6 @@ Linux/容器中使用 `.venv/bin/python`。Docker 相关命令在 Git Bash 下�
 
 - 前端 Vite HMR 偶尔不会应用快速连续修改：先刷新/touch 文件，仍无效再重启 dev server。
 - 修改后端因子后，运行中的 API 可能仍持有旧注册表；重启 API 再保存默认条件。
-- QQ 机器人当前以 WebSocket 出站连接为主；群聊需要 @ 机器人并订阅后才主动推送。
+- QQ 机器人当前使用官方 qq-botpy SDK 的 WebSocket 出站连接；群聊需要 @ 机器人并订阅后才主动推送。
 - 报表 PDF 首次生成较慢，nginx 已配置较长代理超时。
 - 不要直接删除或重建 `data/history`、`data/reports`、`data/bootstrap`；先备份。

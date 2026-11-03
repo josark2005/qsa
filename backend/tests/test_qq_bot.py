@@ -268,3 +268,53 @@ def test_conversation_edits_conditions(app_fixture, monkeypatch) -> None:
         b"Arq0D5A61EgUu4OxUvOp",
         payload["signature"],
     )
+
+def test_botpy_payload_from_group_message() -> None:
+    from botpy.message import GroupMessage
+
+    message = GroupMessage(
+        None,
+        "event-1",
+        {
+            "id": "msg-1",
+            "content": "筛选",
+            "group_openid": "group-openid",
+            "author": {"member_openid": "member-openid"},
+        },
+    )
+    payload = QQBotWebSocket._botpy_group_payload(message)
+    assert payload == {
+        "id": "event-1",
+        "t": "GROUP_AT_MESSAGE_CREATE",
+        "d": {
+            "id": "msg-1",
+            "content": "筛选",
+            "group_openid": "group-openid",
+            "author": {"member_openid": "member-openid"},
+        },
+    }
+
+
+def test_botpy_payload_from_c2c_message() -> None:
+    from botpy.message import C2CMessage
+
+    message = C2CMessage(
+        None,
+        "event-2",
+        {
+            "id": "msg-2",
+            "content": "筛选",
+            "author": {"user_openid": "user-openid"},
+        },
+    )
+    payload = QQBotWebSocket._botpy_c2c_payload(message)
+    assert payload == {
+        "id": "event-2",
+        "t": "C2C_MESSAGE_CREATE",
+        "d": {
+            "id": "msg-2",
+            "content": "筛选",
+            "author": {"user_openid": "user-openid"},
+        },
+    }
+

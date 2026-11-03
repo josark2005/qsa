@@ -37,7 +37,7 @@ frontend (nginx)
             ▼
         backend (FastAPI) ──► PostgreSQL
             │                  Redis
-            ├── QQ WebSocket（出站）
+            ├── QQ WebSocket（官方 qq-botpy SDK，出站）
             ├── PDF → data/reports
             └── 历史归档 → data/history
             ▲
@@ -53,7 +53,7 @@ backend/
   app/services/     报表、用户、PDF、历史归档等业务逻辑
   app/sync/         行情、财报、股东、涨跌停、pipeline
   app/screening/    因子注册表与 SQL 构建
-  app/qq_bot/       QQ WebSocket 与会话式选股
+  app/qq_bot/       QQ 机器人（官方 qq-botpy SDK）与会话式选股
   migrations/       Alembic 迁移
   tests/            pytest
 frontend/
@@ -286,7 +286,7 @@ BaoStock 匿名会话不支持并发：worker 正在回补时，不要再用 CLI
 - HTTPS 下设置 `SESSION_COOKIE_SECURE=true`，并更新 `general.public_base_url`。
 - `data/postgres`、`data/redis`、`data/history`、`data/bootstrap` 等同于生产数据，不要随意删除。
 - `data/bootstrap/`、`.env`、`.env.dev`、`*.db` 已被 gitignore，不要提交 dump 或密钥。
-- API 与 worker 固定单副本：QQ WebSocket、APScheduler 和队列消费者不支持横向扩容。
+- API 与 worker 固定单副本：QQ 机器人 WebSocket、APScheduler 和队列消费者不支持横向扩容。
 - 修改 PDF 模板后提升 `PDF_CACHE_VERSION`，避免继续返回旧缓存。
 
 ## 相关文档

@@ -474,7 +474,7 @@ SETTING_SPECS: tuple[SettingSpec, ...] = (
         type="str",
         default="websocket",
         choices=("websocket", "webhook"),
-        description="websocket 为长连接主动接收；webhook 需要 QQ 平台配置公网回调地址。",
+        description="websocket 使用官方 qq-botpy SDK 长连接主动接收；webhook 需要 QQ 平台配置公网回调地址。",
         order=9,
     ),
     SettingSpec(

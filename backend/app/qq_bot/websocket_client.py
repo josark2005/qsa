@@ -1,29 +1,29 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import uuid
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-try:
-    from websockets.asyncio.client import connect
-except ImportError:  # pragma: no cover - older websockets
-    from websockets import connect  # type: ignore
-
+import botpy
+from botpy.message import C2CMessage, GroupMessage
 from sqlalchemy.orm import sessionmaker
 
 from app.core.config import AppConfig
 from app.core.settings_service import SettingsService
-from app.qq_bot.client import QQBotClient
 from app.qq_bot.conversation import handle_message
 
 logger = logging.getLogger(__name__)
-INTENTS = 1 << 25
 CONNECTED_KEY = "qsa:qq:ws:connected"
 LEADER_KEY = "qsa:qq:ws:leader"
+MESSAGE_EVENTS = {
+    "C2C_MESSAGE_CREATE",
+    "GROUP_AT_MESSAGE_CREATE",
+    "GROUP_MESSAGE_CREATE",
+}
 
 
 @dataclass
@@ -33,7 +33,48 @@ class SocketState:
     credentials: tuple[str, str, bool, str] | None = None
 
 
+class QSABotpyClient(botpy.Client):
+    """QQ 官方 Python SDK 客户端，使用 qq-botpy 的 WebSocket 协议接收事件。"""
+
+    def __init__(self, transport: QQBotWebSocket) -> None:
+        self.transport = transport
+        super().__init__(
+            intents=botpy.Intents(public_messages=True),
+            timeout=15,
+            bot_log=False,
+            ext_handlers=False,
+        )
+
+    async def on_ready(self) -> None:
+        try:
+            logger.info("QQ botpy ready: %s", self.robot.name)
+        except Exception:
+            logger.info("QQ botpy ready")
+        self.transport._mark_connected()
+
+    async def on_group_at_message_create(self, message: GroupMessage) -> None:
+        await self.transport._dispatch_botpy_event(
+            self.transport._botpy_group_payload(message)
+        )
+
+    async def on_group_message_create(self, message: GroupMessage) -> None:
+        await self.transport._dispatch_botpy_event(
+            self.transport._botpy_group_payload(message, event_type="GROUP_MESSAGE_CREATE")
+        )
+
+    async def on_c2c_message_create(self, message: C2CMessage) -> None:
+        await self.transport._dispatch_botpy_event(
+            self.transport._botpy_c2c_payload(message)
+        )
+
+
 class QQBotWebSocket:
+    """使用官方 qq-botpy SDK 接收 QQ 事件。
+
+    保留原有 Redis 去重、单实例 leader election 和设置热更新能力；HTTP 发送
+    与本地 PDF 上传仍由 QQBotClient 完成（qq-botpy 的文件 API 只接受 URL）。
+    """
+
     def __init__(
         self,
         *,
@@ -47,8 +88,11 @@ class QQBotWebSocket:
         self.redis = redis_client
         self.config = config
         self._stop = asyncio.Event()
-        self._socket: Any = None
+        self._client: QSABotpyClient | None = None
+        self._start_task: asyncio.Task | None = None
+        self._monitor_task: asyncio.Task | None = None
         self._state = SocketState()
+        self._active_credentials: tuple[str, str, bool, str] | None = None
         self._instance_id = uuid.uuid4().hex
 
     def _credentials(self) -> tuple[str, str, bool, str]:
@@ -66,12 +110,12 @@ class QQBotWebSocket:
 
     async def close(self) -> None:
         self._stop.set()
-        socket = self._socket
-        if socket is not None:
-            try:
-                await socket.close()
-            except Exception:
-                pass
+        task = self._start_task
+        if task is not None:
+            task.cancel()
+        client = self._client
+        if client is not None:
+            await client.close()
         try:
             self.redis.delete(CONNECTED_KEY)
             if self.redis.get(LEADER_KEY) == self._instance_id:
@@ -86,7 +130,9 @@ class QQBotWebSocket:
                 return True
             return bool(self.redis.set(LEADER_KEY, self._instance_id, nx=True, ex=60))
         except Exception:
-            logger.warning("QQ WebSocket leader election failed; assuming leader", exc_info=True)
+            logger.warning(
+                "QQ botpy leader election failed; assuming leader", exc_info=True
+            )
             return True
 
     async def run(self) -> None:
@@ -106,7 +152,7 @@ class QQBotWebSocket:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.exception("QQ WebSocket connection failed")
+                logger.exception("QQ botpy connection failed")
                 try:
                     self.redis.set(
                         "qsa:qq:last_error",
@@ -115,9 +161,10 @@ class QQBotWebSocket:
                     )
                 except Exception:
                     pass
+            finally:
                 self._clear_connected()
-                await self._sleep(min(delay, 60))
-                delay = min(delay * 2, 60)
+            await self._sleep(min(delay, 60))
+            delay = min(delay * 2, 60)
 
     def _clear_connected(self) -> None:
         try:
@@ -132,125 +179,86 @@ class QQBotWebSocket:
             pass
 
     async def _connect_once(self, app_id: str, secret: str) -> None:
-        client = QQBotClient(
-            app_id=app_id,
-            app_secret=secret,
-            redis_client=self.redis,
-            api_base=self.config.qq_bot_api_base,
+        client = QSABotpyClient(self)
+        self._client = client
+        self._active_credentials = (app_id, secret, True, "websocket")
+        logger.info("QQ botpy connecting with app_id=%s", app_id)
+        start_task = asyncio.create_task(client.start(app_id, secret))
+        self._start_task = start_task
+        self._monitor_task = asyncio.create_task(
+            self._monitor_credentials(start_task)
         )
-        token = await asyncio.to_thread(client.access_token)
-        url = await asyncio.to_thread(client.gateway_url)
-        state = self._state
-        credentials = (app_id, secret, True, "websocket")
-        if state.credentials and state.credentials != credentials:
-            state.session_id = None
-            state.seq = None
-        state.credentials = credentials
-        logger.info("QQ WebSocket connecting to %s", url)
-        async with connect(
-            url,
-            ping_interval=None,
-            close_timeout=5,
-            max_size=2**24,
-        ) as socket:
-            self._socket = socket
-            hello = await asyncio.wait_for(socket.recv(), timeout=15)
-            payload = _decode(hello)
-            if payload.get("op") != 10:
-                raise RuntimeError(f"QQ WebSocket expected hello, got {payload}")
-            interval_ms = int((payload.get("d") or {}).get("heartbeat_interval") or 30000)
-            interval = max(5.0, interval_ms / 1000)
-
-            await self._send_identify(socket, token, state)
-            self._mark_connected(interval)
-            heartbeat = asyncio.create_task(
-                self._heartbeat(socket, interval, state)
-            )
+        try:
+            await start_task
+        finally:
+            monitor = self._monitor_task
+            if monitor is not None:
+                monitor.cancel()
+                with suppress(asyncio.CancelledError):
+                    await monitor
+            self._monitor_task = None
+            self._start_task = None
             try:
-                while not self._stop.is_set():
-                    raw = await socket.recv()
-                    message = _decode(raw)
-                    op = message.get("op")
-                    if op == 0:
-                        await self._handle_dispatch(message, state)
-                    elif op == 7:
-                        logger.info("QQ WebSocket reconnect requested")
-                        break
-                    elif op == 9:
-                        logger.warning("QQ WebSocket invalid session; re-identifying")
-                        state.session_id = None
-                        state.seq = None
-                        break
-                    elif op == 11:
-                        continue
-                    elif op == 10:
-                        continue
-            finally:
-                heartbeat.cancel()
-                try:
-                    await heartbeat
-                except (asyncio.CancelledError, Exception):
-                    pass
-                self._socket = None
-                self._clear_connected()
-
-    async def _send_identify(self, socket: Any, token: str, state: SocketState) -> None:
-        if state.session_id and state.seq is not None:
-            payload = {
-                "op": 6,
-                "d": {
-                    "token": f"QQBot {token}",
-                    "session_id": state.session_id,
-                    "seq": state.seq,
-                },
-            }
-        else:
-            payload = {
-                "op": 2,
-                "d": {
-                    "token": f"QQBot {token}",
-                    "intents": INTENTS,
-                    "shard": [0, 1],
-                    "properties": {
-                        "$os": "linux",
-                        "$browser": "qsa",
-                        "$device": "qsa",
-                    },
-                },
-            }
-        await socket.send(json.dumps(payload, ensure_ascii=False))
-
-    async def _heartbeat(
-        self,
-        socket: Any,
-        interval: float,
-        state: SocketState,
-    ) -> None:
-        while not self._stop.is_set():
-            await asyncio.sleep(interval)
-            try:
-                if self._credentials() != state.credentials:
-                    logger.info("QQ bot credentials/settings changed; reconnecting")
-                    await socket.close()
-                    return
-                await socket.send(json.dumps({"op": 1, "d": state.seq or 0}))
-                self._mark_connected(interval)
-            except asyncio.CancelledError:
-                raise
+                await client.close()
             except Exception:
-                logger.warning("QQ WebSocket heartbeat failed", exc_info=True)
-                try:
-                    await socket.close()
-                except Exception:
-                    pass
+                logger.warning("failed to close QQ botpy client", exc_info=True)
+            self._client = None
+            self._active_credentials = None
+
+    async def _monitor_credentials(self, start_task: asyncio.Task) -> None:
+        while not self._stop.is_set():
+            await self._sleep(5)
+            if self._stop.is_set():
+                return
+            if self._credentials() != self._active_credentials:
+                logger.info("QQ bot settings changed; restarting botpy client")
+                start_task.cancel()
                 return
 
-    def _mark_connected(self, interval: float) -> None:
+    def _mark_connected(self) -> None:
         try:
-            self.redis.set(CONNECTED_KEY, "1", ex=max(60, int(interval * 2)))
+            self.redis.set(CONNECTED_KEY, "1", ex=60)
             self.redis.expire(LEADER_KEY, 60)
         except Exception:
             pass
+
+    @staticmethod
+    def _botpy_group_payload(
+        message: GroupMessage,
+        *,
+        event_type: str = "GROUP_AT_MESSAGE_CREATE",
+    ) -> dict[str, Any]:
+        author = message.author
+        return {
+            "id": message.event_id,
+            "t": event_type,
+            "d": {
+                "id": message.id,
+                "content": message.content or "",
+                "group_openid": message.group_openid,
+                "author": {
+                    "member_openid": getattr(author, "member_openid", None)
+                },
+            },
+        }
+
+    @staticmethod
+    def _botpy_c2c_payload(message: C2CMessage) -> dict[str, Any]:
+        author = message.author
+        return {
+            "id": message.event_id,
+            "t": "C2C_MESSAGE_CREATE",
+            "d": {
+                "id": message.id,
+                "content": message.content or "",
+                "author": {
+                    "user_openid": getattr(author, "user_openid", None)
+                },
+            },
+        }
+
+    async def _dispatch_botpy_event(self, payload: dict[str, Any]) -> None:
+        await self._handle_dispatch(payload, self._state)
 
     async def _handle_dispatch(
         self,
@@ -260,21 +268,19 @@ class QQBotWebSocket:
         seq = message.get("s")
         if isinstance(seq, int):
             state.seq = seq
-        event_type = message.get("t")
+        event_type = str(message.get("t") or "")
         data = message.get("d")
         if event_type == "READY" and isinstance(data, dict):
             state.session_id = data.get("session_id")
-            logger.info("QQ WebSocket READY session=%s", state.session_id)
+            logger.info("QQ botpy READY session=%s", state.session_id)
             return
-        if event_type not in {
-            "C2C_MESSAGE_CREATE",
-            "GROUP_AT_MESSAGE_CREATE",
-            "GROUP_MESSAGE_CREATE",
-        }:
+        if event_type not in MESSAGE_EVENTS:
             return
-        event_id = str(message.get("id") or (data or {}).get("id") or "")
+        event_id = str(
+            message.get("id") or (data or {}).get("id") or ""
+        )
         logger.info(
-            "QQ WebSocket event %s id=%s group=%s message=%s",
+            "QQ botpy event %s id=%s group=%s message=%s",
             event_type,
             event_id,
             (data or {}).get("group_openid"),
@@ -313,12 +319,3 @@ class QQBotWebSocket:
             redis_client=self.redis,
             config=self.config,
         )
-
-
-def _decode(raw: Any) -> dict[str, Any]:
-    if isinstance(raw, bytes):
-        raw = raw.decode("utf-8")
-    value = json.loads(raw)
-    if not isinstance(value, dict):
-        raise ValueError("QQ WebSocket payload is not an object")
-    return value

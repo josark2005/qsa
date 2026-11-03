@@ -20,7 +20,11 @@ def test_daily_report_syncs_and_notifies(app_fixture, monkeypatch, tmp_path) -> 
             "qq_bot.report_group_openid": "group-openid",
         }
     )
-    container.settings_service._snapshot = SettingsSnapshot(values, {}, None)
+    snapshot = SettingsSnapshot(values, {}, None)
+    container.settings_service._snapshot = snapshot
+    # 后台 SettingsWatcher 每隔 settings_poll_seconds 会重新 load 数据库配置，
+    # 测试里要避免它把内存中的 QQ 配置覆盖回默认值（CI 上曾偶发导致 notified=False）。
+    monkeypatch.setattr(container.settings_service, "load", lambda: snapshot)
     with container.session_factory() as db:
         db.add(QQGroupSubscription(group_openid="group-openid", active=True))
         db.commit()

@@ -67,7 +67,10 @@ def test_webhook_dispatches_signed_event(app_fixture, monkeypatch) -> None:
 
     values = dict(container.settings_service.snapshot.values)
     values["qq_bot.transport"] = "webhook"
-    container.settings_service._snapshot = SettingsSnapshot(values, {}, None)
+    snapshot = SettingsSnapshot(values, {}, None)
+    container.settings_service._snapshot = snapshot
+    # 防止后台 SettingsWatcher 轮询时把这里的内存快照覆盖掉（测试时序问题）。
+    monkeypatch.setattr(container.settings_service, "load", lambda: snapshot)
     calls: list[dict] = []
     monkeypatch.setattr(qq_route, "handle_message", lambda payload, **kwargs: calls.append(payload))
     body = json.dumps(

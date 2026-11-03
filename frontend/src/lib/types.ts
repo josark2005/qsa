@@ -281,6 +281,16 @@ export interface ReportHistoryResponse {
   latest_trade_date: string | null
 }
 
+export interface ReportThumbnailItem {
+  symbol: string
+  ohlc: Array<[number | null, number | null, number | null, number | null]>
+}
+
+export interface ReportThumbnailResponse {
+  as_of: string
+  items: ReportThumbnailItem[]
+}
+
 export interface TechnicalPeriod {
   dates: string[]
   ohlc: Array<[number | null, number | null, number | null, number | null]>
@@ -418,6 +428,22 @@ export interface SyncRequestListResponse {
   total: number
   limit: number
   offset: number
+}
+
+export type WorkerLogLevel = "DEBUG" | "INFO" | "WARNING" | "ERROR" | "CRITICAL"
+
+export interface WorkerLogItem {
+  id: number
+  created_at: string
+  level: WorkerLogLevel
+  logger: string
+  message: string
+  request_id: number | null
+}
+
+export interface WorkerLogListResponse {
+  items: WorkerLogItem[]
+  has_more: boolean
 }
 
 export interface SyncStatus {

@@ -14,6 +14,7 @@ import {
 } from "lucide-react"
 import { toast } from "sonner"
 
+import { WorkerLogPanel, WorkerLogQueryCard } from "@/components/WorkerLogPanel"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -773,6 +774,14 @@ export function DataPage() {
                 </div>
               </>
             )}
+            <WorkerLogPanel
+              requestId={activeRequest.id}
+              running={
+                activeRequest.status === "queued" ||
+                activeRequest.status === "running" ||
+                activeRequest.status === "cancelling"
+              }
+            />
           </CardContent>
         </Card>
       ) : null}
@@ -1278,6 +1287,8 @@ export function DataPage() {
           )}
         </CardContent>
       </Card>
+
+      <WorkerLogQueryCard />
 
       <Card>
         <CardHeader>

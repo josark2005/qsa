@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import io
 import logging
 import os
 import threading
@@ -9,13 +8,6 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import pandas as pd
-from matplotlib import font_manager
-from matplotlib.patches import Rectangle
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
@@ -24,7 +16,6 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
-    Image,
     PageBreak,
     Paragraph,
     SimpleDocTemplate,
@@ -58,8 +49,9 @@ PDF_DIR = Path(
         str(Path(__file__).resolve().parents[3] / "data" / "reports"),
     )
 )
-PDF_CACHE_VERSION = "2"
-_CHART_LOCK = threading.Lock()
+PDF_CACHE_VERSION = "3"
+DETAILS_PER_PAGE = 3
+DETAIL_CHART_NOTE = "K 线图与技术指标图请在网页报表中查看。"
 _PDF_LOCK = threading.Lock()
 _FONT_NAME: str | None = None
 
@@ -101,19 +93,6 @@ def _register_pdf_font() -> str:
     return _FONT_NAME
 
 
-def _configure_matplotlib() -> None:
-    path = _font_path()
-    if not path:
-        return
-    try:
-        font_manager.fontManager.addfont(path)
-        name = font_manager.FontProperties(fname=path).get_name()
-        plt.rcParams["font.family"] = name
-        plt.rcParams["axes.unicode_minus"] = False
-    except Exception:
-        logger.warning("failed to configure matplotlib Chinese font", exc_info=True)
-
-
 def _number(value: Any, digits: int = 2) -> str:
     if value is None or value == "":
         return "—"
@@ -142,123 +121,6 @@ def _colored_pct(value: Any, style: ParagraphStyle) -> Paragraph:
 
 def _cell(value: Any, style: ParagraphStyle) -> Paragraph:
     return Paragraph(str(value) if value not in (None, "") else "—", style)
-
-
-def _render_detail_chart(period: dict[str, Any], title: str) -> io.BytesIO:
-    _configure_matplotlib()
-    dates = list(period.get("dates") or [])[-140:]
-    ohlc = list(period.get("ohlc") or [])[-140:]
-    volume = list(period.get("volume") or [])[-140:]
-    if not dates or not ohlc:
-        raise ValueError("no chart data")
-
-    def tail(values: list[Any]) -> list[Any]:
-        return list(values or [])[-len(dates):]
-
-    ma5, ma10, ma20 = (
-        tail(period["ma"]["ma5"]),
-        tail(period["ma"]["ma10"]),
-        tail(period["ma"]["ma20"]),
-    )
-    expma20, expma50 = (
-        tail(period["expma"]["expma20"]),
-        tail(period["expma"]["expma50"]),
-    )
-    dif, dea, hist = (
-        tail(period["macd"]["dif"]),
-        tail(period["macd"]["dea"]),
-        tail(period["macd"]["hist"]),
-    )
-    k, d, j = (
-        tail(period["kdj"]["k"]),
-        tail(period["kdj"]["d"]),
-        tail(period["kdj"]["j"]),
-    )
-    rsi6, rsi12, rsi24 = (
-        tail(period["rsi"]["rsi6"]),
-        tail(period["rsi"]["rsi12"]),
-        tail(period["rsi"]["rsi24"]),
-    )
-    x = list(range(len(dates)))
-
-    with _CHART_LOCK:
-        fig, axes = plt.subplots(
-            5,
-            1,
-            figsize=(11, 7.4),
-            sharex=True,
-            gridspec_kw={"height_ratios": [4.2, 1.0, 1.2, 1.2, 1.2]},
-        )
-        price = axes[0]
-        for index, bar in enumerate(ohlc):
-            open_price, close_price, low, high = [
-                float(value) if value is not None else None for value in bar
-            ]
-            if None in (open_price, close_price, low, high):
-                continue
-            color = UP_COLOR if close_price >= open_price else DOWN_COLOR
-            price.vlines(index, low, high, color=color, linewidth=0.6)
-            bottom = min(open_price, close_price)
-            height = max(abs(close_price - open_price), 0.0001)
-            price.add_patch(
-                Rectangle(
-                    (index - 0.32, bottom),
-                    0.64,
-                    height,
-                    facecolor=color,
-                    edgecolor=color,
-                    linewidth=0.3,
-                )
-            )
-        price.plot(x, ma5, color="#f59e0b", linewidth=0.8, label="MA5")
-        price.plot(x, ma10, color="#3b82f6", linewidth=0.8, label="MA10")
-        price.plot(x, ma20, color="#a855f7", linewidth=0.8, label="MA20")
-        price.plot(x, expma20, color="#ec4899", linewidth=0.9, label="EXPMA20")
-        price.plot(x, expma50, color="#14b8a6", linewidth=0.9, label="EXPMA50")
-        price.set_title(title, loc="left", fontsize=10)
-        price.legend(loc="upper left", fontsize=6, ncol=5, frameon=False)
-        price.grid(alpha=0.15)
-
-        volume_colors = [
-            UP_COLOR
-            if (bar[1] is not None and bar[0] is not None and float(bar[1]) >= float(bar[0]))
-            else DOWN_COLOR
-            for bar in ohlc
-        ]
-        axes[1].bar(x, [float(value or 0) for value in volume], color=volume_colors, width=0.7)
-        axes[1].set_ylabel("Vol", fontsize=6)
-        axes[2].bar(
-            x,
-            [float(value or 0) for value in hist],
-            color=[UP_COLOR if float(value or 0) >= 0 else DOWN_COLOR for value in hist],
-            width=0.7,
-        )
-        axes[2].plot(x, dif, color="#f59e0b", linewidth=0.8)
-        axes[2].plot(x, dea, color="#3b82f6", linewidth=0.8)
-        axes[2].set_ylabel("MACD", fontsize=6)
-        axes[3].plot(x, k, color="#f59e0b", linewidth=0.8)
-        axes[3].plot(x, d, color="#3b82f6", linewidth=0.8)
-        axes[3].plot(x, j, color="#a855f7", linewidth=0.8)
-        axes[3].set_ylabel("KDJ", fontsize=6)
-        axes[4].plot(x, rsi6, color="#f59e0b", linewidth=0.8)
-        axes[4].plot(x, rsi12, color="#3b82f6", linewidth=0.8)
-        axes[4].plot(x, rsi24, color="#a855f7", linewidth=0.8)
-        axes[4].set_ylim(0, 100)
-        axes[4].set_ylabel("RSI", fontsize=6)
-
-        step = max(1, len(dates) // 8)
-        ticks = list(range(0, len(dates), step))
-        axes[4].set_xticks(ticks)
-        axes[4].set_xticklabels([dates[index] for index in ticks], rotation=0, fontsize=6)
-        for axis in axes:
-            axis.tick_params(axis="y", labelsize=6)
-            axis.grid(alpha=0.12)
-        fig.tight_layout()
-        buffer = io.BytesIO()
-        fig.savefig(buffer, format="png", dpi=150, bbox_inches="tight")
-        plt.close(fig)
-        buffer.seek(0)
-        return buffer
 
 
 def _condition_text(report: ScreenReport) -> list[str]:
@@ -332,7 +194,7 @@ def _detail_story(
     instrument = db.scalar(select(Instrument).where(Instrument.symbol == symbol))
     story: list[Any] = [
         Paragraph(f"{row.get('name') or symbol}（{symbol}）", head_style),
-        Spacer(1, 3 * mm),
+        Spacer(1, 2 * mm),
         Paragraph(
             f"板块：{row.get('board') or '—'}　收盘：{_number(row.get('close'))}　"
             f"涨跌：<font color='{UP_COLOR if float(row.get('pct_chg') or 0) >= 0 else DOWN_COLOR}'>"
@@ -344,10 +206,10 @@ def _detail_story(
             f"净利同比：{_pct(row.get('net_profit_yoy'))}　ROE：{_pct(row.get('roe'))}",
             body_style,
         ),
-        Spacer(1, 3 * mm),
+        Spacer(1, 2 * mm),
     ]
     if report.data_as_of is None or instrument is None:
-        story.append(Paragraph("暂无足够行情数据绘制技术图表。", body_style))
+        story.append(Paragraph("暂无足够行情数据。", body_style))
         return story
 
     technical = build_technical_payload(db, instrument, report.data_as_of)
@@ -383,14 +245,14 @@ def _detail_story(
             ]
         )
     )
-    story.extend([metric_table, Spacer(1, 3 * mm)])
-    try:
-        chart = _render_detail_chart(daily, f"{row.get('name') or symbol} 日线")
-        story.append(Image(chart, width=178 * mm, height=102 * mm))
-    except Exception:
-        logger.warning("failed to render PDF chart for %s", symbol, exc_info=True)
-        story.append(Paragraph("技术图表生成失败。", body_style))
-    story.append(PageBreak())
+    story.extend(
+        [
+            metric_table,
+            Spacer(1, 2 * mm),
+            Paragraph(DETAIL_CHART_NOTE, body_style),
+            Spacer(1, 4 * mm),
+        ]
+    )
     return story
 
 
@@ -499,20 +361,17 @@ def _build_report_pdf_locked(
         story.append(Spacer(1, 3 * mm))
     story.append(Paragraph("入选标的汇总", head_style))
     story.append(_summary_table(report, body_style, head_cell))
-    story.append(PageBreak())
 
-    if report.total <= 50:
-        for row in report.rows:
+    # 超过 50 只只输出汇总表；否则每页最多 3 个标的详情块，不再嵌入 K 线图。
+    detail_rows = list(report.rows) if report.total <= 50 else []
+    if detail_rows:
+        story.append(PageBreak())
+        for index, row in enumerate(detail_rows):
             story.extend(
                 _detail_story(db, report, row, body_style=body_style, head_style=head_style)
             )
-    else:
-        story.append(
-            Paragraph(
-                "如需查看个股 K 线与技术指标，请打开报表链接或缩小筛选条件至 50 只以内。",
-                body_style,
-            )
-        )
+            if (index + 1) % DETAILS_PER_PAGE == 0 and index + 1 < len(detail_rows):
+                story.append(PageBreak())
 
     doc = SimpleDocTemplate(
         str(target),

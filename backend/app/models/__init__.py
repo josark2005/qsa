@@ -13,6 +13,7 @@ from app.models.sync_run import SyncRun
 from app.models.system_setting import SystemSetting
 from app.models.trading_calendar import TradingCalendar
 from app.models.user import User
+from app.models.worker_log import WorkerLog
 
 __all__ = [
     "AuditLog",
@@ -30,4 +31,5 @@ __all__ = [
     "SystemSetting",
     "TradingCalendar",
     "User",
+    "WorkerLog",
 ]

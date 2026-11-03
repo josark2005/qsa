@@ -15,6 +15,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.routes import (
     admin_audit,
+    admin_logs,
     admin_settings,
     admin_sync,
     admin_users,
@@ -31,6 +32,7 @@ from app.core.db import make_engine, make_session_factory
 from app.core.redis_client import make_redis
 from app.core.settings_service import SettingsService
 from app.core.settings_watcher import SettingsWatcher
+from app.datasources.baostock import log_baostock_transport
 from app.qq_bot.websocket_client import QQBotWebSocket
 from app.services.history_archive import auto_import_history
 from app.services.login_limiter import LoginLimiter
@@ -67,6 +69,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             settings_service.load()
         except Exception:
             logger.exception("failed to load settings at startup; using defaults")
+        log_baostock_transport()
 
         session_service = SessionService(redis_client, settings_service)
         login_limiter = LoginLimiter(redis_client, settings_service)
@@ -139,6 +142,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.include_router(admin_settings.router, prefix=config.api_prefix)
     app.include_router(admin_settings.public_router, prefix=config.api_prefix)
     app.include_router(admin_audit.router, prefix=config.api_prefix)
+    app.include_router(admin_logs.router, prefix=config.api_prefix)
     app.include_router(admin_sync.router, prefix=config.api_prefix)
     app.include_router(screen.router, prefix=config.api_prefix)
     app.include_router(instruments.router, prefix=config.api_prefix)

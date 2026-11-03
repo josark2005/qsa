@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from datetime import date
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -17,8 +18,13 @@ from app.core.db import make_engine, make_session_factory, utcnow
 from app.core.redis_client import make_redis
 from app.core.settings_service import SettingsService
 from app.core.settings_watcher import SettingsWatcher
+from app.datasources.baostock import log_baostock_transport
 from app.models.sync_request import SyncRequest
 from app.services.history_archive import DEFAULT_HISTORY_DIR, import_history
+from app.services.worker_logs import (
+    CURRENT_SYNC_REQUEST,
+    install_worker_log_handler,
+)
 from app.sync.bars import (
     backfill_baostock_bars,
     backfill_tencent_bars,
@@ -34,6 +40,12 @@ from app.sync.pipelines import (
 
 logger = logging.getLogger(__name__)
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+
+# 只有真实的数据回补请求会按 sync.retry_count / sync.retry_delay_seconds 重试。
+# 定时 pipeline 有外部副作用（例如每日 QQ 群汇报），重试会造成重复推送，故排除。
+RETRYABLE_REQUEST_KINDS = frozenset({"backfill", "full_backfill", "history_import"})
+# 重试等待按不超过 1 秒的切片 sleep，保证停止请求能在一秒内生效。
+RETRY_WAIT_SLICE_SECONDS = 1.0
 
 
 class SchedulerManager:
@@ -184,6 +196,99 @@ class RequestWorker:
             )
             return status in {"cancelling", "cancelled"}
 
+    def _sleep(self, seconds: float) -> None:
+        """可注入的等待钩子；测试替换它即可避免真实 sleep。"""
+        time.sleep(seconds)
+
+    def _retry_policy(self, kind: str) -> tuple[int, int]:
+        """返回 (重试次数, 重试间隔秒数)。
+
+        仅回补类请求重试；定时 pipeline 有外部副作用（如 QQ 群汇报），重试可能
+        重复推送，因此不纳入。未注入 settings_service 时不重试。
+        """
+        if self.settings_service is None or kind not in RETRYABLE_REQUEST_KINDS:
+            return 0, 0
+        snapshot = self.settings_service.snapshot
+        retry_count = max(0, snapshot.get_int("sync.retry_count"))
+        delay_seconds = max(0, snapshot.get_int("sync.retry_delay_seconds"))
+        return retry_count, delay_seconds
+
+    def _retry_progress(
+        self,
+        request_id: int,
+        *,
+        attempt: int,
+        total_attempts: int,
+        delay_seconds: int,
+        error: Exception,
+    ) -> None:
+        """失败后记录重试进度，保留原有 percent。"""
+        summary = f"{type(error).__name__}: {error}"
+        if len(summary) > 300:
+            summary = f"{summary[:300]}…"
+        with self.session_factory() as db:
+            entry = db.get(SyncRequest, request_id)
+            progress = dict(entry.progress or {}) if entry is not None else {}
+        progress.update(
+            {
+                "phase": "retry",
+                "indicator": "retry",
+                "message": (
+                    f"第 {attempt}/{total_attempts} 次执行失败：{summary}；"
+                    f"{delay_seconds} 秒后重试"
+                ),
+                "attempt": attempt,
+                "total_attempts": total_attempts,
+            }
+        )
+        self._update_progress(request_id, progress)
+
+    def _wait_for_retry(self, request_id: int, delay_seconds: int) -> None:
+        """在重试间隔内按不超过 1 秒的切片等待，并持续检查取消。"""
+        remaining = float(delay_seconds)
+        while remaining > 0:
+            if self._is_cancelling(request_id):
+                raise SyncCancelled("用户停止任务")
+            slice_seconds = min(RETRY_WAIT_SLICE_SECONDS, remaining)
+            self._sleep(slice_seconds)
+            remaining -= slice_seconds
+        if self._is_cancelling(request_id):
+            raise SyncCancelled("用户停止任务")
+
+    def _execute_with_retries(self, request: dict) -> dict:
+        """执行请求；回补类请求按设置重试，pipeline 等只执行一次。"""
+        request_id = request["id"]
+        retry_count, delay_seconds = self._retry_policy(request["kind"])
+        total_attempts = retry_count + 1
+        for attempt in range(1, total_attempts + 1):
+            if self._is_cancelling(request_id):
+                raise SyncCancelled("用户停止任务")
+            try:
+                return self._execute(request)
+            except SyncCancelled:
+                raise
+            except Exception as exc:
+                if attempt >= total_attempts:
+                    raise
+                logger.warning(
+                    "sync request %s attempt %s/%s failed, retry in %ss: %s: %s",
+                    request_id,
+                    attempt,
+                    total_attempts,
+                    delay_seconds,
+                    type(exc).__name__,
+                    exc,
+                )
+                self._retry_progress(
+                    request_id,
+                    attempt=attempt,
+                    total_attempts=total_attempts,
+                    delay_seconds=delay_seconds,
+                    error=exc,
+                )
+                self._wait_for_retry(request_id, delay_seconds)
+        raise RuntimeError("retry loop exhausted unexpectedly")  # pragma: no cover
+
     def _finish(
         self,
         request_id: int,
@@ -191,6 +296,7 @@ class RequestWorker:
         status: str,
         result: dict | None = None,
         error: str | None = None,
+        message: str | None = None,
     ) -> None:
         with self.session_factory() as db:
             entry = db.get(SyncRequest, request_id)
@@ -208,7 +314,7 @@ class RequestWorker:
             elif status == "cancelled":
                 progress.update({"phase": "cancelled", "message": "已停止"})
             else:
-                progress.update({"phase": "failed", "message": "执行失败"})
+                progress.update({"phase": "failed", "message": message or "执行失败"})
             entry.progress = progress
             entry.updated_at = utcnow()
             db.commit()
@@ -410,6 +516,39 @@ class RequestWorker:
         results["end"] = end.isoformat()
         return results
 
+    def _complete_request(self, request_id: int, result) -> None:
+        """Mark a request finished, surfacing partial failures.
+
+        全量回补按步骤捕获异常并写进 result["errors"]，过去这里一律标记成功，
+        用户看到「完成」但 BaoStock 等步骤其实失败了。非空 errors 视为失败。
+        """
+        errors = (
+            result.get("errors")
+            if isinstance(result, dict) and result.get("source") == "full"
+            else None
+        )
+        if errors:
+            summary = "; ".join(f"{name}: {value}" for name, value in errors.items())
+            logger.warning(
+                "sync request %s finished with %s failed steps: %s",
+                request_id,
+                len(errors),
+                summary,
+            )
+            self._finish(
+                request_id,
+                status="failed",
+                result=jsonable_encoder(result),
+                error=summary,
+                message=f"{len(errors)} 个步骤异常",
+            )
+            return
+        self._finish(
+            request_id,
+            status="success",
+            result=jsonable_encoder(result),
+        )
+
     def _run(self) -> None:
         logger.info("sync request worker started")
         while not self._stop.is_set():
@@ -419,8 +558,9 @@ class RequestWorker:
                 continue
             request_id = request["id"]
             logger.info("processing sync request %s: %s", request_id, request["kind"])
+            request_context = CURRENT_SYNC_REQUEST.set(request_id)
             try:
-                result = self._execute(request)
+                result = self._execute_with_retries(request)
                 if self._is_cancelling(request_id):
                     self._finish(
                         request_id,
@@ -429,12 +569,8 @@ class RequestWorker:
                     )
                     logger.info("sync request %s cancelled", request_id)
                 else:
-                    self._finish(
-                        request_id,
-                        status="success",
-                        result=jsonable_encoder(result),
-                    )
-                    logger.info("sync request %s completed", request_id)
+                    self._complete_request(request_id, result)
+                    logger.info("sync request %s handled", request_id)
             except SyncCancelled:
                 self._finish(
                     request_id,
@@ -457,6 +593,8 @@ class RequestWorker:
                         status="failed",
                         error=f"{type(exc).__name__}: {exc}",
                     )
+            finally:
+                CURRENT_SYNC_REQUEST.reset(request_context)
         logger.info("sync request worker stopped")
 
 
@@ -466,8 +604,10 @@ def main() -> int:
         level=getattr(logging, config.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    log_baostock_transport()
     engine = make_engine(config.database_url)
     session_factory = make_session_factory(engine)
+    log_handler = install_worker_log_handler(session_factory)
     redis_client = make_redis(config)
     scheduler = BlockingScheduler(
         timezone=SHANGHAI,
@@ -539,6 +679,7 @@ def main() -> int:
             redis_client.close()
         except Exception:
             pass
+        log_handler.stop()
         engine.dispose()
     return 0
 

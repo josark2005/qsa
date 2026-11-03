@@ -55,6 +55,13 @@ services:
       QQ_BOT_APP_ID: ${QQ_BOT_APP_ID:-}
       QQ_BOT_APP_SECRET: ${QQ_BOT_APP_SECRET:-}
       QQ_BOT_PUBLIC_BASE_URL: ${QQ_BOT_PUBLIC_BASE_URL:-http://localhost:5173}
+    # .env.dev 通过 env_file 注入；显式 environment 仍然优先，文件缺失时也能启动。
+    env_file:
+      - path: .env.dev
+        required: false
+    # Linux 上 Docker 不会自动解析 host.docker.internal，必须映射到宿主机网关。
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./backend:/app
       - ./data:/app/data
@@ -85,6 +92,13 @@ services:
       QSA_REPORT_PDF_DIR: /app/data/reports
       QQ_BOT_APP_ID: ${QQ_BOT_APP_ID:-}
       QQ_BOT_APP_SECRET: ${QQ_BOT_APP_SECRET:-}
+    # .env.dev 通过 env_file 注入；显式 environment 仍然优先，文件缺失时也能启动。
+    env_file:
+      - path: .env.dev
+        required: false
+    # Linux 上 Docker 不会自动解析 host.docker.internal，必须映射到宿主机网关。
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./backend:/app
       - ./data:/app/data

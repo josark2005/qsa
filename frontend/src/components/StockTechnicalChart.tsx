@@ -1,6 +1,8 @@
 import { useEffect, useRef } from "react"
 import type { ECharts, EChartsOption } from "echarts"
 
+import { cn } from "@/lib/utils"
+
 import type { TechnicalPeriod } from "@/lib/types"
 
 const UP_COLOR = "#dc2626"
@@ -21,7 +23,79 @@ function line(name: string, data: Array<number | null>, color: string, width = 1
   }
 }
 
-function buildOption(data: TechnicalPeriod, period: string): EChartsOption {
+function slicePeriod(data: TechnicalPeriod, maxBars: number): TechnicalPeriod {
+  const size = data.dates.length
+  if (!maxBars || maxBars <= 0 || size <= maxBars) return data
+  const from = size - maxBars
+  const tail = <T,>(values: T[]): T[] => values.slice(from)
+  return {
+    ...data,
+    dates: tail(data.dates),
+    ohlc: tail(data.ohlc),
+    volume: tail(data.volume),
+    ma: {
+      ma5: tail(data.ma.ma5),
+      ma10: tail(data.ma.ma10),
+      ma20: tail(data.ma.ma20),
+    },
+    expma: {
+      expma20: tail(data.expma.expma20),
+      expma50: tail(data.expma.expma50),
+    },
+    macd: {
+      dif: tail(data.macd.dif),
+      dea: tail(data.macd.dea),
+      hist: tail(data.macd.hist),
+    },
+    kdj: {
+      k: tail(data.kdj.k),
+      d: tail(data.kdj.d),
+      j: tail(data.kdj.j),
+    },
+    rsi: {
+      rsi6: tail(data.rsi.rsi6),
+      rsi12: tail(data.rsi.rsi12),
+      rsi24: tail(data.rsi.rsi24),
+    },
+  }
+}
+
+function computeChartLayout(height: number) {
+  const top = 22
+  // 底部留出旋转后的日期标签空间，避免标签被裁掉。
+  const footer = 30
+  const priceGap = 14
+  const indicatorGap = 24
+  const available = Math.max(280, height - top - footer - priceGap - indicatorGap * 3)
+  const unit = available / 8
+  const priceHeight = Math.round(unit * 4)
+  const volumeHeight = Math.round(unit)
+  const indicatorHeight = Math.round(unit)
+  const volumeTop = top + priceHeight + priceGap
+  const macdTop = volumeTop + volumeHeight + indicatorGap
+  const kdjTop = macdTop + indicatorHeight + indicatorGap
+  const rsiTop = kdjTop + indicatorHeight + indicatorGap
+  return {
+    top,
+    priceHeight,
+    volumeTop,
+    volumeHeight,
+    macdTop,
+    kdjTop,
+    rsiTop,
+    indicatorHeight,
+  }
+}
+
+function buildOption(
+  source: TechnicalPeriod,
+  period: string,
+  maxBars: number | undefined,
+  enableZoom: boolean,
+  height: number,
+): EChartsOption {
+  const data = maxBars ? slicePeriod(source, maxBars) : source
+  const layout = computeChartLayout(height)
   const volumeData = data.volume.map((value, index) => {
     const bar = data.ohlc[index]
     const bullish = bar ? Number(bar[1]) >= Number(bar[0]) : true
@@ -51,19 +125,19 @@ function buildOption(data: TechnicalPeriod, period: string): EChartsOption {
       {
         text: "MACD(12,26,9)",
         left: GRID_LEFT,
-        top: 412,
+        top: Math.max(0, layout.macdTop - 16),
         textStyle: { fontSize: 10, fontWeight: "normal", color: "#71717a" },
       },
       {
         text: "KDJ(9,3,3)",
         left: GRID_LEFT,
-        top: 512,
+        top: Math.max(0, layout.kdjTop - 16),
         textStyle: { fontSize: 10, fontWeight: "normal", color: "#71717a" },
       },
       {
         text: "RSI(6,12,24)",
         left: GRID_LEFT,
-        top: 612,
+        top: Math.max(0, layout.rsiTop - 16),
         textStyle: { fontSize: 10, fontWeight: "normal", color: "#71717a" },
       },
     ],
@@ -76,11 +150,31 @@ function buildOption(data: TechnicalPeriod, period: string): EChartsOption {
       textStyle: { color: "#fafafa", fontSize: 11 },
     },
     grid: [
-      { left: GRID_LEFT, right: GRID_RIGHT, top: 24, height: 300 },
-      { left: GRID_LEFT, right: GRID_RIGHT, top: 338, height: 58 },
-      { left: GRID_LEFT, right: GRID_RIGHT, top: 426, height: 76 },
-      { left: GRID_LEFT, right: GRID_RIGHT, top: 526, height: 76 },
-      { left: GRID_LEFT, right: GRID_RIGHT, top: 626, height: 76 },
+      { left: GRID_LEFT, right: GRID_RIGHT, top: layout.top, height: layout.priceHeight },
+      {
+        left: GRID_LEFT,
+        right: GRID_RIGHT,
+        top: layout.volumeTop,
+        height: layout.volumeHeight,
+      },
+      {
+        left: GRID_LEFT,
+        right: GRID_RIGHT,
+        top: layout.macdTop,
+        height: layout.indicatorHeight,
+      },
+      {
+        left: GRID_LEFT,
+        right: GRID_RIGHT,
+        top: layout.kdjTop,
+        height: layout.indicatorHeight,
+      },
+      {
+        left: GRID_LEFT,
+        right: GRID_RIGHT,
+        top: layout.rsiTop,
+        height: layout.indicatorHeight,
+      },
     ],
     xAxis: xAxisIndexes.map((index) => ({
       type: "category",
@@ -91,9 +185,11 @@ function buildOption(data: TechnicalPeriod, period: string): EChartsOption {
       axisTick: { show: false },
       axisLabel: {
         show: index === 4,
-        fontSize: 10,
+        fontSize: maxBars ? 9 : 10,
         color: "#71717a",
-        hideOverlap: true,
+        rotate: maxBars ? 45 : 0,
+        interval: maxBars ? 1 : "auto",
+        hideOverlap: !maxBars,
       },
       splitLine: { show: false },
       min: "dataMin",
@@ -138,26 +234,28 @@ function buildOption(data: TechnicalPeriod, period: string): EChartsOption {
         splitLine: { lineStyle: { color: "#f4f4f5" } },
       },
     ],
-    dataZoom: [
-      {
-        type: "inside",
-        xAxisIndex: xAxisIndexes,
-        start: period === "daily" ? 35 : 0,
-        end: 100,
-      },
-      {
-        type: "slider",
-        xAxisIndex: xAxisIndexes,
-        top: 718,
-        height: 18,
-        start: period === "daily" ? 35 : 0,
-        end: 100,
-        borderColor: "#e4e4e7",
-        fillerColor: "rgba(24,24,27,0.08)",
-        handleSize: 12,
-        textStyle: { fontSize: 9, color: "#71717a" },
-      },
-    ],
+    dataZoom: enableZoom
+      ? [
+          {
+            type: "inside",
+            xAxisIndex: xAxisIndexes,
+            start: period === "daily" ? 35 : 0,
+            end: 100,
+          },
+          {
+            type: "slider",
+            xAxisIndex: xAxisIndexes,
+            top: Math.max(0, height - 30),
+            height: 18,
+            start: period === "daily" ? 35 : 0,
+            end: 100,
+            borderColor: "#e4e4e7",
+            fillerColor: "rgba(24,24,27,0.08)",
+            handleSize: 12,
+            textStyle: { fontSize: 9, color: "#71717a" },
+          },
+        ]
+      : [],
     series: [
       {
         name: "K线",
@@ -207,9 +305,18 @@ function buildOption(data: TechnicalPeriod, period: string): EChartsOption {
 export function StockTechnicalChart({
   data,
   period,
+  maxBars,
+  enableZoom = true,
+  height = 750,
 }: {
   data: TechnicalPeriod
   period: string
+  /** 只展示最近 N 根 K 线（指标仍按完整历史计算后截断显示）。 */
+  maxBars?: number
+  /** 是否显示 dataZoom 缩放条；只看固定窗口时关闭。 */
+  enableZoom?: boolean
+  /** 画布高度（像素），5 个子图按比例自适应。 */
+  height?: number
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -221,7 +328,7 @@ export function StockTechnicalChart({
     void import("echarts").then((echarts) => {
       if (disposed || !containerRef.current) return
       chart = echarts.init(containerRef.current, undefined, { renderer: "canvas" })
-      chart.setOption(buildOption(data, period), true)
+      chart.setOption(buildOption(data, period, maxBars, enableZoom, height), true)
       observer = new ResizeObserver(() => chart?.resize())
       observer.observe(containerRef.current)
     })
@@ -231,11 +338,15 @@ export function StockTechnicalChart({
       observer?.disconnect()
       chart?.dispose()
     }
-  }, [data, period])
+  }, [data, period, maxBars, enableZoom, height])
 
   return (
-    <div className="w-full overflow-x-auto">
-      <div ref={containerRef} className="h-[750px] min-w-[680px] w-full" />
+    <div className={cn("w-full", !maxBars && "overflow-x-auto")}>
+      <div
+        ref={containerRef}
+        className={cn("w-full", !maxBars && "min-w-[680px]")}
+        style={{ height }}
+      />
     </div>
   )
 }

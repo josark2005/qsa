@@ -139,6 +139,9 @@ cp .env.dev.example .env
 docker compose -f docker-compose.dev.yml up -d postgres redis
 ```
 
+仅源码运行后端/worker 时，`.env` 由应用读取配置，但不会自动导出到进程环境变量；需要代理时先执行
+`set -a; . ./.env; set +a` 再启动，否则 `HTTP_PROXY` / `BAOSTOCK_SOCKS_PROXY` 不生效。
+
 ### 后端
 
 ```bash
@@ -172,6 +175,13 @@ cp .env.dev.example .env.dev
 docker compose --env-file .env.dev -f docker-compose.dev.yml up --build
 ```
 
+`.env.dev` 会通过 compose 的 `env_file` 注入 backend/worker（显式 `environment` 仍优先）；
+代理等变量写在这里即可。修改后需要重建容器才会重新注入：
+
+```bash
+docker compose --env-file .env.dev -f docker-compose.dev.yml up -d backend worker
+```
+
 开发端口：`5173` 前端、`8000` 后端、`5432` PostgreSQL、`6379` Redis。
 
 ## 测试
@@ -201,24 +211,66 @@ pnpm build
 | `QQ_BOT_APP_ID` / `QQ_BOT_APP_SECRET` | QQ 机器人凭据 |
 | `QQ_BOT_PUBLIC_BASE_URL` | 报表链接公网前缀 |
 | `QSA_ADMIN_USERNAME` / `QSA_ADMIN_PASSWORD` | 空库时创建初始管理员 |
+| `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | 腾讯/AkShare 出站代理（requests），见「网络代理」 |
+| `BAOSTOCK_SOCKS_PROXY` | BaoStock 的 SOCKS5 代理，如 `socks5h://host.docker.internal:7893` |
 
 更多系统设置可在管理端「系统设置」中热更新。
 
 ### 网络代理
 
-回补可通过「系统设置 → 数据同步 → 网络代理」配置 `sync.proxy_url`，例如：
+容器内访问宿主机上的代理必须使用 `host.docker.internal`：两个 compose 文件都已为 backend/worker 声明
+`extra_hosts: ["host.docker.internal:host-gateway"]`（Linux 上 Docker 不会自动解析该域名）。
+宿主机代理需要监听 `0.0.0.0` 或局域网地址（例如 Clash 的 allow-lan）；只监听 `127.0.0.1` 时代理连不上。
+容器里的 `127.0.0.1` 指的是容器自身，不是宿主机。
 
-```text
-http://127.0.0.1:7890
-```
-
-该配置会应用到腾讯和 AkShare 的 requests 请求；BaoStock 使用原始 TCP，不支持 HTTP 代理。BaoStock 需要单独配置 SOCKS5：
+腾讯 / AkShare 走 requests，通过标准代理变量生效（生产写 `.env`，完整开发栈写 `.env.dev`）：
 
 ```ini
-BAOSTOCK_SOCKS_PROXY=socks5h://192.168.1.60:7893
+HTTP_PROXY=http://host.docker.internal:7890
+HTTPS_PROXY=http://host.docker.internal:7890
+NO_PROXY=localhost,127.0.0.1,postgres,redis,backend
 ```
 
-日报的缺失日线已改为优先使用 Tencent；BaoStock 仍用于全量回补和历史因子核对。Docker 容器内访问宿主机代理时，不能写 `127.0.0.1`，应使用 `host.docker.internal` 或宿主机网关地址。
+BaoStock 使用原始 TCP（端口 10030），`HTTP_PROXY` / `HTTPS_PROXY` 对它无效，必须单独配置 SOCKS5：
+
+```ini
+BAOSTOCK_SOCKS_PROXY=socks5h://host.docker.internal:7893
+```
+
+`socks5h://` 表示域名由代理端解析，`socks5://` 表示本地解析；不写协议时按 `socks5h://` 处理。
+
+BaoStock 的匿名登录握手较慢（实测 10–40 秒，容器或服务端限流时更久），客户端登录超时为 90 秒并会自动重试一次；
+日志出现 `10002007 网络接收错误` 时，先看同一条登录日志打印的传输方式（`direct TCP` 或 `SOCKS5 host:port`）与耗时，
+再判断是出站网络受限还是代理配置问题。
+
+环境变量只在创建容器时注入，改完 `.env` / `.env.dev` 后需要重建容器：
+
+```bash
+# 生产
+docker compose up -d backend worker
+
+# 完整开发栈
+docker compose --env-file .env.dev -f docker-compose.dev.yml up -d backend worker
+```
+
+容器内自检 BaoStock 连通性：
+
+```bash
+docker compose -f docker-compose.dev.yml --env-file .env.dev exec worker python - <<'PY'
+from app.datasources.baostock import BaoStockClient
+with BaoStockClient() as client:
+    print(client.fetch_trade_dates("2026-01-01", "2026-01-10").head())
+PY
+```
+
+管理端「系统设置 → 数据同步 → 网络代理」（`sync.proxy_url`）只影响腾讯/AkShare，并且一旦非空就会覆盖
+进程内的 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`（清空或重启后恢复环境变量）；BaoStock 不受它影响。
+用环境变量配置代理时请把界面里这一项留空，或填同样的 `http://host.docker.internal:7890`；
+不要填 `127.0.0.1`，那会把请求指向容器自身。
+
+BaoStock 匿名会话不支持并发：worker 正在回补时，不要再用 CLI 或另一个进程登录 BaoStock，
+第二次登录会把前一个会话顶掉，之后的查询会返回 `10001001 用户未登录`。
+日报的缺失日线已改为优先使用 Tencent；BaoStock 仍用于全量回补和历史因子核对。
 
 ## CI/CD
 

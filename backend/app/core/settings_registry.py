@@ -293,8 +293,12 @@ SETTING_SPECS: tuple[SettingSpec, ...] = (
         default="",
         description=(
             "回补和行情请求使用的 HTTP/HTTPS 代理，例如 "
-            "http://127.0.0.1:7890；留空表示不使用。"
-            "腾讯与 AkShare 生效，BaoStock 的 TCP 连接不支持 HTTP 代理。"
+            "http://192.168.1.60:7890；留空表示不使用。"
+            "仅对腾讯与 AkShare 的 requests 生效，并会覆盖容器内的 "
+            "HTTP(S)_PROXY 环境变量；BaoStock 走原始 TCP，需要在环境变量 "
+            "BAOSTOCK_SOCKS_PROXY 中单独配置 SOCKS5。"
+            "容器内不要写 127.0.0.1（那是容器自身），请用宿主机网关"
+            "（如 http://host.docker.internal:7890）或宿主机 LAN IP。"
         ),
         order=5,
         tags=("network",),
@@ -427,7 +431,7 @@ SETTING_SPECS: tuple[SettingSpec, ...] = (
         default=3,
         minimum=0,
         maximum=10,
-        description="同步任务失败后的最大重试次数。",
+        description="回补类同步请求（backfill/full_backfill/history_import）失败后的最大重试次数；定时 pipeline 不重试。",
         order=110,
     ),
     SettingSpec(
@@ -438,7 +442,7 @@ SETTING_SPECS: tuple[SettingSpec, ...] = (
         default=300,
         minimum=10,
         maximum=3600,
-        description="同步任务失败后的重试间隔，单位秒。",
+        description="回补类同步请求失败后的重试间隔，单位秒；定时 pipeline 不重试。",
         order=120,
     ),
     SettingSpec(

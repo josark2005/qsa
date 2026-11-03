@@ -101,6 +101,9 @@ services:
       HISTORY_DIR: /app/data/history
       HISTORY_AUTO_IMPORT: "false"
       QSA_REPORT_PDF_DIR: /app/data/reports
+    # Linux 上 Docker 不会自动解析 host.docker.internal，必须映射到宿主机网关。
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./data:/app/data
     expose:
@@ -130,6 +133,9 @@ services:
       HISTORY_DIR: /app/data/history
       HISTORY_AUTO_IMPORT: "false"
       QSA_REPORT_PDF_DIR: /app/data/reports
+    # Linux 上 Docker 不会自动解析 host.docker.internal，必须映射到宿主机网关。
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./data:/app/data
     depends_on:

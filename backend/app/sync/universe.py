@@ -61,6 +61,12 @@ def sync_universe(
     *,
     ak_client: AkShareClient | None = None,
 ) -> dict[str, Any]:
+    """同步证券列表，BaoStock 不可用时回退到 AkShare。
+
+    AkShare 只提供代码和名称，list_date/delist_date/industry 都是 None；因此
+    只有在 BaoStock 真正返回数据时才允许 ON CONFLICT 更新这些列，否则每次
+    AkShare 回退同步都会把已有标的的上市/退市日期与行业清空。
+    """
     basic = pd.DataFrame()
     industry_raw = pd.DataFrame()
     try:
@@ -72,6 +78,10 @@ def sync_universe(
             "BaoStock universe unavailable; falling back to AkShare",
             exc_info=True,
         )
+
+    # 记录每个数据源是否真的产出了数据，决定 ON CONFLICT 时能否覆盖对应列。
+    baostock_available = not basic.empty
+    industry_available = not industry_raw.empty
 
     industry_map: dict[str, str] = {}
     if not industry_raw.empty:
@@ -149,23 +159,27 @@ def sync_universe(
         }
 
     values = list(rows.values())
+    # AkShare 回退行的 list_date/delist_date/industry 均为 None，只有 BaoStock
+    # 提供这些字段；未拿到数据时不要把它们放进 ON CONFLICT 更新列。
+    update_columns = [
+        "name",
+        "asset_type",
+        "board",
+        "status",
+        "is_st",
+        "fund_type",
+        "source",
+    ]
+    if baostock_available:
+        update_columns.extend(["list_date", "delist_date"])
+    if industry_available:
+        update_columns.append("industry")
     count = bulk_upsert(
         db,
         Instrument,
         values,
         index_elements=["symbol"],
-        update_columns=[
-            "name",
-            "asset_type",
-            "board",
-            "status",
-            "list_date",
-            "delist_date",
-            "is_st",
-            "industry",
-            "fund_type",
-            "source",
-        ],
+        update_columns=update_columns,
         chunk_size=1000,
     )
     db.commit()

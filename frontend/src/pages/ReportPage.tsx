@@ -3,12 +3,9 @@ import { useQuery } from "@tanstack/react-query"
 import {
   AlertTriangle,
   ArrowLeft,
-  ChevronLeft,
-  ChevronRight,
   Copy,
   Download,
   ExternalLink,
-  Loader2,
   Pencil,
   RotateCcw,
   Shield,
@@ -17,6 +14,7 @@ import { useNavigate, useParams } from "react-router-dom"
 import { toast } from "sonner"
 
 import { useAuth } from "@/auth/AuthProvider"
+import { ReportDataTable } from "@/components/ReportDataTable"
 import { StockTechnicalChart } from "@/components/StockTechnicalChart"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
@@ -28,21 +26,20 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
-import { Skeleton } from "@/components/ui/skeleton"
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table"
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import { Skeleton } from "@/components/ui/skeleton"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { api } from "@/lib/api"
 import { formatDateTime, formatFactorValue, pctTone } from "@/lib/format"
-import type { TechnicalPeriod } from "@/lib/types"
+import { cn } from "@/lib/utils"
+import type { ReportThumbnailItem, TechnicalPeriod } from "@/lib/types"
 
-const PAGE_SIZE = 50
 const BOARD_LABELS: Record<string, string> = {
   main: "主板",
   gem: "创业板",
@@ -50,13 +47,25 @@ const BOARD_LABELS: Record<string, string> = {
   bse: "北交所",
 }
 const PERIOD_LABELS = { daily: "日线", weekly: "周线", monthly: "月线" } as const
+const TREND_STORAGE_KEY = "qsa.report.showTrend"
+const CHART_BARS = 20
+
+function computeChartHeight(): number {
+  if (typeof window === "undefined") return 470
+  // 弹窗最大 95vh。窄屏时指标卡会换成两列、标题更高，需要多留一些空间；
+  // 目标是让「K 线 + 成交量 + MACD/KDJ/RSI」在弹窗内一屏放下，不需要滚动。
+  const headerAllowance = window.innerWidth < 640 ? 345 : 285
+  return Math.round(
+    Math.min(600, Math.max(340, window.innerHeight * 0.95 - headerAllowance)),
+  )
+}
 
 function numberText(value: number | null | undefined, digits = 2): string {
   if (value === null || value === undefined || Number.isNaN(value)) return "—"
   return value.toFixed(digits)
 }
 
-function Metric({
+function MetricCard({
   label,
   value,
   tone,
@@ -66,30 +75,40 @@ function Metric({
   tone?: "up" | "down"
 }) {
   return (
-    <div className="rounded-md border bg-muted/20 px-2.5 py-2">
-      <div className="text-[10px] text-muted-foreground">{label}</div>
-      <div
-        className={
-          tone === "up"
-            ? "mt-0.5 text-xs font-medium text-red-600"
-            : tone === "down"
-              ? "mt-0.5 text-xs font-medium text-emerald-600"
-              : "mt-0.5 text-xs font-medium"
-        }
-      >
-        {value}
-      </div>
-    </div>
+    <Card className="gap-0.5 py-1.5">
+      <CardContent className="px-2.5">
+        <div className="text-[10px] text-muted-foreground">{label}</div>
+        <div
+          className={cn(
+            "mt-0.5 text-xs font-medium",
+            tone === "up" && "text-red-600",
+            tone === "down" && "text-emerald-600",
+          )}
+        >
+          {value}
+        </div>
+      </CardContent>
+    </Card>
   )
+}
+
+function readTrendPreference(): boolean {
+  try {
+    return window.localStorage.getItem(TREND_STORAGE_KEY) !== "0"
+  } catch {
+    return true
+  }
 }
 
 export function ReportPage() {
   const { token = "" } = useParams()
   const navigate = useNavigate()
   const { user } = useAuth()
-  const [page, setPage] = useState(1)
-  const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null)
+  const [detailSymbol, setDetailSymbol] = useState<string | null>(null)
   const [period, setPeriod] = useState<keyof typeof PERIOD_LABELS>("daily")
+  const [showTrend, setShowTrend] = useState<boolean>(readTrendPreference)
+  const [visibleSymbols, setVisibleSymbols] = useState<string[]>([])
+  const [chartHeight, setChartHeight] = useState<number>(computeChartHeight)
 
   const reportQuery = useQuery({
     queryKey: ["public-report", token],
@@ -115,29 +134,45 @@ export function ReportPage() {
   }, [report])
 
   useEffect(() => {
-    if (!report) return
-    const symbols = report.rows
-      .map((row) => String(row.symbol ?? ""))
-      .filter(Boolean)
-    if (!selectedSymbol || !symbols.includes(selectedSymbol)) {
-      setSelectedSymbol(symbols[0] ?? null)
+    try {
+      window.localStorage.setItem(TREND_STORAGE_KEY, showTrend ? "1" : "0")
+    } catch {
+      // localStorage 不可用时仅本次会话生效
     }
-  }, [report, selectedSymbol])
+  }, [showTrend])
 
-  const technicalQuery = useQuery({
-    queryKey: ["report-technical", token, selectedSymbol],
-    queryFn: () => api.reportTechnical(token, selectedSymbol as string),
-    enabled: Boolean(report && selectedSymbol),
+  useEffect(() => {
+    const onResize = () => setChartHeight(computeChartHeight())
+    window.addEventListener("resize", onResize)
+    return () => window.removeEventListener("resize", onResize)
+  }, [])
+
+  const visibleSymbolsKey = visibleSymbols.join(",")
+  const thumbnailsQuery = useQuery({
+    queryKey: ["report-thumbnails", token, visibleSymbolsKey],
+    queryFn: () => api.reportThumbnails(token, visibleSymbols),
+    enabled: Boolean(token && showTrend && visibleSymbols.length),
     staleTime: Number.POSITIVE_INFINITY,
   })
 
-  const pageCount = report ? Math.max(1, Math.ceil(report.rows.length / PAGE_SIZE)) : 1
-  const pageRows = report
-    ? report.rows.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
-    : []
-  const selectedRow = useMemo(
-    () => report?.rows.find((row) => String(row.symbol) === selectedSymbol) ?? null,
-    [report, selectedSymbol],
+  const technicalQuery = useQuery({
+    queryKey: ["report-technical", token, detailSymbol],
+    queryFn: () => api.reportTechnical(token, detailSymbol as string),
+    enabled: Boolean(report && detailSymbol),
+    staleTime: Number.POSITIVE_INFINITY,
+  })
+
+  const thumbnailMap = useMemo(() => {
+    const map = new Map<string, ReportThumbnailItem["ohlc"]>()
+    for (const item of thumbnailsQuery.data?.items ?? []) {
+      map.set(item.symbol, item.ohlc)
+    }
+    return map
+  }, [thumbnailsQuery.data])
+
+  const detailRow = useMemo(
+    () => report?.rows.find((row) => String(row.symbol) === detailSymbol) ?? null,
+    [report, detailSymbol],
   )
   const technical = technicalQuery.data
   const periodData: TechnicalPeriod | null = technical?.periods[period] ?? null
@@ -327,136 +362,81 @@ export function ReportPage() {
               </Badge>
             </CardTitle>
             <CardDescription>
-              点击任意标的查看日线、周线、月线及技术指标。第 {page} / {pageCount} 页
+              支持搜索、板块筛选和点击表头排序；走势列为近 {CHART_BARS} 个交易日 K 线，点击行打开详情。
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="overflow-x-auto rounded-lg border">
-              <Table className="min-w-[1080px]">
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>名称 / 代码</TableHead>
-                    <TableHead>板块</TableHead>
-                    <TableHead>收盘</TableHead>
-                    <TableHead>涨跌</TableHead>
-                    <TableHead>股东变化</TableHead>
-                    <TableHead>营收同比</TableHead>
-                    <TableHead>净利同比</TableHead>
-                    <TableHead>ROE</TableHead>
-                    {report.extra_fields.map((extra) => (
-                      <TableHead key={extra.alias}>
-                        {extra.label}
-                        {extra.params.days ? `(${extra.params.days}日)` : ""}
-                      </TableHead>
-                    ))}
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {pageRows.map((row, index) => {
-                    const symbol = String(row.symbol ?? "")
-                    const active = symbol === selectedSymbol
-                    return (
-                      <TableRow
-                        key={`${symbol}-${index}`}
-                        className={active ? "bg-muted/60" : "cursor-pointer"}
-                        onClick={() => setSelectedSymbol(symbol)}
-                      >
-                        <TableCell>
-                          <div className="font-medium">{String(row.name ?? "—")}</div>
-                          <div className="text-[11px] text-muted-foreground">{symbol}</div>
-                        </TableCell>
-                        <TableCell>
-                          <Badge variant="outline">
-                            {BOARD_LABELS[String(row.board ?? "")] ??
-                              String(row.board ?? "—")}
-                          </Badge>
-                        </TableCell>
-                        <TableCell>{formatFactorValue("close", row.close)}</TableCell>
-                        <TableCell className={pctTone(row.pct_chg)}>
-                          {formatFactorValue("pct_chg", row.pct_chg)}
-                        </TableCell>
-                        <TableCell>
-                          {formatFactorValue("holder_change_pct", row.holder_change_pct)}
-                        </TableCell>
-                        <TableCell>{formatFactorValue("revenue_yoy", row.revenue_yoy)}</TableCell>
-                        <TableCell>
-                          {formatFactorValue("net_profit_yoy", row.net_profit_yoy)}
-                        </TableCell>
-                        <TableCell>{formatFactorValue("roe", row.roe)}</TableCell>
-                        {report.extra_fields.map((extra) => (
-                          <TableCell key={extra.alias}>
-                            {formatFactorValue(extra.field, row[extra.alias])}
-                          </TableCell>
-                        ))}
-                      </TableRow>
-                    )
-                  })}
-                </TableBody>
-              </Table>
-            </div>
-            <div className="mt-3 flex items-center justify-between text-xs text-muted-foreground">
-              <span>
-                第 {page} / {pageCount} 页 · 共 {report.included.toLocaleString()} 只
-              </span>
-              <div className="flex gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={page <= 1}
-                  onClick={() => setPage((value) => Math.max(1, value - 1))}
-                >
-                  <ChevronLeft className="size-4" />
-                  上一页
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={page >= pageCount}
-                  onClick={() => setPage((value) => Math.min(pageCount, value + 1))}
-                >
-                  下一页
-                  <ChevronRight className="size-4" />
-                </Button>
-              </div>
-            </div>
+            <ReportDataTable
+              activeSymbol={detailSymbol}
+              extraFields={report.extra_fields}
+              onRowClick={setDetailSymbol}
+              onShowTrendChange={setShowTrend}
+              onVisibleSymbolsChange={setVisibleSymbols}
+              rows={report.rows}
+              showTrend={showTrend}
+              thumbnails={thumbnailMap}
+              thumbnailsLoading={thumbnailsQuery.isLoading}
+            />
           </CardContent>
         </Card>
 
-        <Card>
-          <CardHeader>
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <CardTitle className="text-base">
-                  {selectedRow ? String(selectedRow.name ?? selectedSymbol) : "个股技术图表"}
-                  {selectedSymbol ? (
-                    <span className="ml-2 text-xs font-normal text-muted-foreground">
-                      {selectedSymbol}
-                    </span>
-                  ) : null}
-                </CardTitle>
-                <CardDescription>
-                  前复权 K 线；MA5/10/20、EXPMA(20,50)、MACD(12,26,9)、KDJ(9,3,3)、RSI(6,12,24)
-                </CardDescription>
-              </div>
-              <Tabs
-                value={period}
-                onValueChange={(value) =>
-                  setPeriod(value as keyof typeof PERIOD_LABELS)
-                }
-              >
-                <TabsList>
-                  <TabsTrigger value="daily">日线</TabsTrigger>
-                  <TabsTrigger value="weekly">周线</TabsTrigger>
-                  <TabsTrigger value="monthly">月线</TabsTrigger>
-                </TabsList>
-              </Tabs>
-            </div>
-          </CardHeader>
-          <CardContent className="space-y-3">
+        <Dialog
+          open={Boolean(detailSymbol)}
+          onOpenChange={(open) => {
+            if (!open) setDetailSymbol(null)
+          }}
+        >
+          <DialogContent className="max-h-[95vh] w-[95vw] max-w-5xl overflow-x-hidden overflow-y-auto sm:max-w-5xl">
+            <DialogHeader>
+              <DialogTitle className="flex flex-wrap items-center gap-2 pr-8">
+                {detailRow ? String(detailRow.name ?? detailSymbol) : detailSymbol}
+                <span className="text-xs font-normal text-muted-foreground">
+                  {detailSymbol}
+                </span>
+                {detailRow?.board ? (
+                  <Badge variant="outline">
+                    {BOARD_LABELS[String(detailRow.board)] ?? String(detailRow.board)}
+                  </Badge>
+                ) : null}
+                {report.stale ? <Badge variant="destructive">历史报表</Badge> : null}
+              </DialogTitle>
+              <DialogDescription>
+                前复权 K 线，仅展示最近 {CHART_BARS} 个交易日；指标按完整历史计算
+                （MA5/10/20、EXPMA(20,50)、MACD(12,26,9)、KDJ(9,3,3)、RSI(6,12,24)）
+              </DialogDescription>
+            </DialogHeader>
+
+            <Card className="py-2">
+              <CardContent className="flex flex-wrap items-center gap-x-4 gap-y-1 px-3 text-xs">
+                <span>
+                  收盘 {formatFactorValue("close", detailRow?.close)}
+                </span>
+                <span className={pctTone(detailRow?.pct_chg)}>
+                  涨跌 {formatFactorValue("pct_chg", detailRow?.pct_chg)}
+                </span>
+                <span className="text-muted-foreground">
+                  报表快照，行情截至 {report.data_as_of ?? report.screen_as_of}
+                </span>
+              </CardContent>
+            </Card>
+
+            <Tabs
+              value={period}
+              onValueChange={(value) =>
+                setPeriod(value as keyof typeof PERIOD_LABELS)
+              }
+            >
+              <TabsList>
+                <TabsTrigger value="daily">日线</TabsTrigger>
+                <TabsTrigger value="weekly">周线</TabsTrigger>
+                <TabsTrigger value="monthly">月线</TabsTrigger>
+              </TabsList>
+            </Tabs>
+
             {technicalQuery.isLoading ? (
-              <div className="flex h-64 items-center justify-center text-sm text-muted-foreground">
-                <Loader2 className="mr-2 size-4 animate-spin" />
-                加载技术指标
+              <div className="flex flex-col gap-2">
+                <Skeleton className="h-16 w-full" />
+                <Skeleton className="h-[420px] w-full" />
               </div>
             ) : technicalQuery.isError ? (
               <Alert variant="destructive">
@@ -468,25 +448,41 @@ export function ReportPage() {
                 </AlertDescription>
               </Alert>
             ) : periodData && periodData.latest ? (
-              <>
+              <div className="flex flex-col gap-3">
                 <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-8">
-                  <Metric
+                  <MetricCard
                     label="收盘"
                     value={numberText(periodData.latest.close)}
                   />
-                  <Metric
+                  <MetricCard
                     label="涨跌"
                     value={`${numberText(periodData.latest.pct_chg)}%`}
-                    tone={
-                      (periodData.latest.pct_chg ?? 0) >= 0 ? "up" : "down"
-                    }
+                    tone={(periodData.latest.pct_chg ?? 0) >= 0 ? "up" : "down"}
                   />
-                  <Metric label="MACD 柱" value={numberText(periodData.latest.macd.hist, 3)} />
-                  <Metric label="DIF / DEA" value={`${numberText(periodData.latest.macd.dif, 3)} / ${numberText(periodData.latest.macd.dea, 3)}`} />
-                  <Metric label="K / D / J" value={`${numberText(periodData.latest.kdj.k)} / ${numberText(periodData.latest.kdj.d)} / ${numberText(periodData.latest.kdj.j)}`} />
-                  <Metric label="EXPMA20 / 50" value={`${numberText(periodData.latest.expma20)} / ${numberText(periodData.latest.expma50)}`} />
-                  <Metric label="RSI6 / 12 / 24" value={`${numberText(periodData.latest.rsi.rsi6)} / ${numberText(periodData.latest.rsi.rsi12)} / ${numberText(periodData.latest.rsi.rsi24)}`} />
-                  <Metric label="周期数 / 截止" value={`${periodData.bar_count} · ${periodData.latest.trade_date}`} />
+                  <MetricCard
+                    label="MACD 柱"
+                    value={numberText(periodData.latest.macd.hist, 3)}
+                  />
+                  <MetricCard
+                    label="DIF / DEA"
+                    value={`${numberText(periodData.latest.macd.dif, 3)} / ${numberText(periodData.latest.macd.dea, 3)}`}
+                  />
+                  <MetricCard
+                    label="K / D / J"
+                    value={`${numberText(periodData.latest.kdj.k)} / ${numberText(periodData.latest.kdj.d)} / ${numberText(periodData.latest.kdj.j)}`}
+                  />
+                  <MetricCard
+                    label="EXPMA20 / 50"
+                    value={`${numberText(periodData.latest.expma20)} / ${numberText(periodData.latest.expma50)}`}
+                  />
+                  <MetricCard
+                    label="RSI6 / 12 / 24"
+                    value={`${numberText(periodData.latest.rsi.rsi6)} / ${numberText(periodData.latest.rsi.rsi12)} / ${numberText(periodData.latest.rsi.rsi24)}`}
+                  />
+                  <MetricCard
+                    label="周期数 / 截止"
+                    value={`${periodData.bar_count} · ${periodData.latest.trade_date}`}
+                  />
                 </div>
                 {periodData.limited_history ? (
                   <Alert>
@@ -496,15 +492,27 @@ export function ReportPage() {
                     </AlertDescription>
                   </Alert>
                 ) : null}
-                <StockTechnicalChart data={periodData} period={period} />
-              </>
-            ) : (
-              <div className="rounded-lg border border-dashed py-16 text-center text-sm text-muted-foreground">
-                {technical?.message ?? "暂无足够历史数据绘制图表"}
+                <Card className="overflow-hidden py-0">
+                  <CardContent className="p-2">
+                    <StockTechnicalChart
+                      data={periodData}
+                      enableZoom={false}
+                      height={chartHeight}
+                      maxBars={CHART_BARS}
+                      period={period}
+                    />
+                  </CardContent>
+                </Card>
               </div>
+            ) : (
+              <Card>
+                <CardContent className="py-12 text-center text-sm text-muted-foreground">
+                  {technical?.message ?? "暂无足够历史数据绘制图表"}
+                </CardContent>
+              </Card>
             )}
-          </CardContent>
-        </Card>
+          </DialogContent>
+        </Dialog>
 
         <footer className="pb-6 text-center text-[11px] text-muted-foreground">
           该链接为永久只读报表链接 · QSA

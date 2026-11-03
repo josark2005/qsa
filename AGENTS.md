@@ -90,7 +90,12 @@ Linux/容器中使用 `.venv/bin/python`。Docker 相关命令在 Git Bash 下�
 - 报表最多保存 1000 行；PDF 个股详情最多 50 只，超过 50 只只输出汇总表。
 - 非当日报表必须显示 stale 警告；不要把历史报表伪装成实时结果。
 - 修改 PDF 模板/表头后要提升 `report_pdf.py` 的 `PDF_CACHE_VERSION`，否则旧缓存仍会被返回。
-- 容器内依赖 `fonts-noto-cjk` 生成中文 PDF 与图表；不要移除。
+- PDF 不生成个股 K 线/趋势图：详情页只有指标表（每页最多 3 只）。K 线图在网页报表里看：表格的「走势」列是近 20 个交易日 SVG 缩略图（可用「走势」开关关闭，偏好存 localStorage），点行打开详情 Dialog（日/周/月线 + 技术指标）。
+- 网页报表表格是 shadcn DataTable（@tanstack/react-table）：支持名称/代码搜索、板块筛选、点击表头排序（数值列首次点击升序）、重置与分页；新增交互优先复用 shadcn/ui 组件。
+- 详情 Dialog 的技术图固定只画最近 20 根 K 线并关闭 dataZoom（`StockTechnicalChart` 的 `maxBars`/`enableZoom`），指标仍按完整历史计算；TrendsPage 仍用完整历史 + 缩放。
+- 详情图高度按窗口自适应（`computeChartHeight`，弹窗 95vh），K 线 + 成交量 + MACD/KDJ/RSI 一屏展示、不滚动；`StockTechnicalChart` 的 `height` 参数会按比例重排 5 个子图与标题位置。
+- 缩略图数据来自 `GET /api/public/reports/{token}/thumbnails?symbols=...`（`services/report_thumbnails.py`）：每页一次批量请求，最多 60 个代码、每标的最近 30 根日线，前复权（`close_adj/close`），只返回报表内的标的。
+- 容器内依赖 `fonts-noto-cjk` 生成中文 PDF（matplotlib 已不用于 PDF，依赖暂时保留）；不要移除字体。
 
 ## 同步与数据源
 
@@ -98,8 +103,10 @@ Linux/容器中使用 `.venv/bin/python`。Docker 相关命令在 Git Bash 下�
 - 腾讯负责快速价格/增量，BaoStock 负责沪深历史与完整字段，AkShare 补充北交所等；BaoStock 可能限流/登录失败。
 - 2017 年及以前数据已做 Tencent + Sina 多源核对并固化在月度归档；2018 年之后仍有部分标的稀疏，不要假设全量完整。
 - 先导入已有 SQLite 归档，再考虑重新下载；不要重复抓取已有数据。
-- 回补代理在系统设置 `sync.proxy_url` 配置；腾讯/AkShare 通过 requests 环境变量生效。BaoStock 原始 TCP 需要 `BAOSTOCK_SOCKS_PROXY=socks5h://host:port`，由 PySocks 定向走 SOCKS5；日报缺失日线走 Tencent，避免依赖 BaoStock。
+- 回补代理在系统设置 `sync.proxy_url` 配置；腾讯/AkShare 通过 requests 环境变量生效，该设置非空时会覆盖进程内的 `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`（BaoStock 不受影响）。BaoStock 原始 TCP 需要环境变量 `BAOSTOCK_SOCKS_PROXY=socks5h://host:port`（只认环境变量，界面设置无效），由 PySocks 定向走 SOCKS5；容器内访问宿主机代理必须用 `host.docker.internal`（依赖 compose 的 `extra_hosts: host-gateway`），宿主机代理须监听 0.0.0.0 或局域网地址，容器内不要写 `127.0.0.1`（那是容器自身）。BaoStock 匿名会话不能并发：worker 回补期间不要再起 CLI 或第二个进程登录，否则旧会话被顶掉，查询返回 `10001001 用户未登录`；同一进程内已用进程锁把登录-查询-登出串行化。匿名登录握手较慢（10–40 秒），客户端登录超时 90 秒并重试一次。日报缺失日线走 Tencent，避免依赖 BaoStock。
 - worker 使用 PostgreSQL advisory lock 和 `sync_requests` 队列（`FOR UPDATE SKIP LOCKED`）。重启 worker 前先检查是否有 running/queued 请求。
+- worker 日志：`worker_logs` 表（`models/worker_log.py`）由 `services/worker_logs.py` 的 `WorkerLogHandler` 异步落库（有界队列 + 1s/100 条批量写，启动只保留 20000 行 / 7 天，超长消息截断 4000 字符）；只捕获 `app.*` 的 INFO+ 和其它 logger 的 WARNING+，并通过 ContextVar `CURRENT_SYNC_REQUEST` 给手动同步请求打上 `request_id`。handler 只在 `worker.main()` 安装（pytest 不启动线程）。
+- 日志查询 API：`GET /api/admin/logs`（admin）支持 `level` / `request_id` / `q` / `after_id`（增量轮询）/ `before_id`（向前翻页）/ `limit≤500`，返回按 id 升序的 `{items, has_more}`；参数非法或 after/before 同传返回 422。前端在 `/admin/data`：活动请求卡片内「数据更新日志」每 2s 增量 tail，底部「Worker 日志」卡片提供级别/关键词/请求 ID 筛选、自动刷新与「加载更早」。
 - API 与 worker 都设计为单副本：QQ WebSocket、APScheduler 和队列消费者不能随意横向扩容。
 
 ## 前端约定
@@ -122,6 +129,7 @@ Linux/容器中使用 `.venv/bin/python`。Docker 相关命令在 Git Bash 下�
 - 生产：只有 frontend 发布宿主机端口（默认 `8080`）；backend/worker/postgres/redis 只走内部网络。
 - 开发：发布 `5173`（前端）、`8000`（后端）、`5432`（PostgreSQL）、`6379`（Redis），默认 `DEV_BIND_IP=0.0.0.0`。
 - 开发前端只挂载 `src`、`public`、`index.html` 和配置；`node_modules` 保留在镜像内。修改依赖后需要重新 build 开发镜像。
+- 生产 `.env` 通过 `env_file` 注入 backend/worker；完整开发栈把 `.env.dev` 通过 `env_file`（`required: false`）注入。两侧 backend/worker 都声明 `extra_hosts: ["host.docker.internal:host-gateway"]`，容器内访问宿主机代理用 `host.docker.internal`；改环境变量后要 `up -d backend worker` 重建容器，`restart` 不会重新读取 env。
 - 生产初始化顺序：`db-restore` → `migrate` → `backend`/`worker` → `frontend`。
 - `migrate` 负责迁移、首次历史导入和管理员创建；生产设置 `HISTORY_AUTO_IMPORT=false`，避免启动时重复扫描归档。
 - 完整 dump 含密码哈希、QQ 密钥和系统设置，`data/bootstrap/` 已 gitignore，不要提交或外传。

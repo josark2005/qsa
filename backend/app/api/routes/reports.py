@@ -32,6 +32,10 @@ from app.screening.registry import FactorError
 from app.screening.query_builder import ScreenError
 from app.services.audit import add_audit
 from app.services.report_pdf import build_report_pdf
+from app.services.report_thumbnails import (
+    THUMBNAIL_MAX_SYMBOLS,
+    build_thumbnail_payload,
+)
 from app.services.screen_quota import QuotaUnavailableError, ScreenQuota
 from app.services.screen_reports import (
     create_report_snapshot,
@@ -212,6 +216,33 @@ def get_report_technical(
     payload = build_technical_payload(db, instrument, as_of)
     payload["indicator_params"] = INDICATOR_PARAMS
     return payload
+
+
+@public_router.get("/{token}/thumbnails")
+def get_report_thumbnails(
+    token: str,
+    response: Response,
+    symbols: str = Query(min_length=1, max_length=2000),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    requested: list[str] = []
+    for part in symbols.split(","):
+        symbol = part.strip()
+        if symbol and symbol not in requested:
+            requested.append(symbol)
+    if not requested:
+        raise api_error(422, "invalid_symbols", "请至少提供一个标的代码")
+    if len(requested) > THUMBNAIL_MAX_SYMBOLS:
+        raise api_error(
+            422,
+            "too_many_symbols",
+            f"一次最多查询 {THUMBNAIL_MAX_SYMBOLS} 个标的",
+        )
+
+    report = _get_report(db, token)
+    response.headers["X-Robots-Tag"] = "noindex, nofollow"
+    response.headers["Cache-Control"] = "public, max-age=3600"
+    return build_thumbnail_payload(db, report, requested)
 
 
 @public_router.get("/{token}/pdf")

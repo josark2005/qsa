@@ -13,6 +13,7 @@ import type {
   QQSubscriptionListResponse,
   ReportHistoryResponse,
   ReportResponse,
+  ReportThumbnailResponse,
   ScreenRequest,
   ScreenResponse,
   SyncRequest,
@@ -25,6 +26,7 @@ import type {
   UserCreateResponse,
   UserListResponse,
   User,
+  WorkerLogListResponse,
 } from "@/lib/types"
 
 const API_BASE = "/api"
@@ -282,6 +284,17 @@ export const api = {
     )
   },
 
+  reportThumbnails(
+    token: string,
+    symbols: string[],
+  ): Promise<ReportThumbnailResponse> {
+    return request<ReportThumbnailResponse>(
+      `/public/reports/${encodeURIComponent(token)}/thumbnails${queryString({
+        symbols: symbols.join(","),
+      })}`,
+    )
+  },
+
   syncStatus(): Promise<SyncStatus> {
     return request<SyncStatus>("/admin/sync/status")
   },
@@ -326,6 +339,28 @@ export const api = {
         offset: params.offset,
         pipeline: params.pipeline,
         status: params.status,
+      })}`,
+      { signal: params.signal },
+    )
+  },
+
+  workerLogs(params: {
+    level?: string
+    requestId?: number
+    q?: string
+    afterId?: number
+    beforeId?: number
+    limit?: number
+    signal?: AbortSignal
+  }): Promise<WorkerLogListResponse> {
+    return request<WorkerLogListResponse>(
+      `/admin/logs${queryString({
+        level: params.level,
+        request_id: params.requestId,
+        q: params.q,
+        after_id: params.afterId,
+        before_id: params.beforeId,
+        limit: params.limit,
       })}`,
       { signal: params.signal },
     )

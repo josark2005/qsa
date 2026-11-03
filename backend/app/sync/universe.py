@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import logging
 from datetime import date
 from typing import Any
 
+import pandas as pd
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -17,6 +19,8 @@ from app.datasources.symbols import (
 )
 from app.models.instrument import Instrument
 from app.sync.db_utils import bulk_upsert
+
+logger = logging.getLogger(__name__)
 
 
 def _is_st(name: str) -> bool:
@@ -57,9 +61,17 @@ def sync_universe(
     *,
     ak_client: AkShareClient | None = None,
 ) -> dict[str, Any]:
-    with BaoStockClient() as client:
-        basic = client.fetch_all_basic()
-        industry_raw = client.fetch_stock_industry()
+    basic = pd.DataFrame()
+    industry_raw = pd.DataFrame()
+    try:
+        with BaoStockClient() as client:
+            basic = client.fetch_all_basic()
+            industry_raw = client.fetch_stock_industry()
+    except Exception:
+        logger.warning(
+            "BaoStock universe unavailable; falling back to AkShare",
+            exc_info=True,
+        )
 
     industry_map: dict[str, str] = {}
     if not industry_raw.empty:

@@ -24,6 +24,7 @@ from app.models.limit_event import LimitEvent
 from app.models.shareholder_count import ShareholderCount
 from app.models.trading_calendar import TradingCalendar
 from app.screening.registry import (
+    CATEGORY_LABELS,
     FactorError,
     FactorSpec,
     get_factor,
@@ -94,6 +95,76 @@ def _years_start(as_of: date, years: int) -> date:
     except ValueError:
         # Feb 29 -> Feb 28
         return as_of.replace(year=as_of.year - years, day=28)
+
+
+# 涨停放量判定阈值：「涨停且放量」= 涨停日成交量 >= 一贯均量 * 该倍数。
+VOLUME_EXPAND_RATIO = 1.0
+
+
+def _limit_up_exists_expression(as_of_start: date, as_of: date, mode: str):
+    return exists(
+        select(1)
+        .select_from(LimitEvent)
+        .where(
+            LimitEvent.instrument_id == Instrument.id,
+            LimitEvent.direction == "up",
+            LimitEvent.trade_date >= as_of_start,
+            LimitEvent.trade_date <= as_of,
+            _limit_mode_condition(mode),
+        )
+        .correlate(Instrument)
+    )
+
+
+def _limit_up_volume_ratio_expression(
+    as_of: date,
+    start: date,
+    mode: str,
+    base_days: int,
+):
+    """最近窗口内最近一次涨停的成交量 / 涨停前一贯均量（前 base_days 个交易日均量）。"""
+
+    event = aliased(LimitEvent)
+    event_date = (
+        select(event.trade_date)
+        .where(
+            event.instrument_id == Instrument.id,
+            event.direction == "up",
+            event.trade_date >= start,
+            event.trade_date <= as_of,
+            _limit_mode_condition(mode, event),
+        )
+        .order_by(event.trade_date.desc())
+        .limit(1)
+        .correlate(Instrument)
+        .scalar_subquery()
+    )
+    event_volume = (
+        select(DailyBar.volume)
+        .where(
+            DailyBar.instrument_id == Instrument.id,
+            DailyBar.trade_date == event_date,
+        )
+        .correlate(Instrument)
+        .scalar_subquery()
+    )
+    base_volume = (
+        select(func.avg(DailyBar.volume))
+        .where(
+            DailyBar.instrument_id == Instrument.id,
+            DailyBar.trade_date < event_date,
+            DailyBar.volume > 0,
+        )
+        .order_by(DailyBar.trade_date.desc())
+        .limit(base_days)
+        .correlate(Instrument)
+        .scalar_subquery()
+    )
+    return (
+        select(event_volume / func.nullif(base_volume, 0))
+        .where(event_date.isnot(None))
+        .scalar_subquery()
+    )
 
 
 def _window_expression(
@@ -218,6 +289,21 @@ def _window_expression(
             )
             .scalar_subquery()
         )
+    if field in {"limit_up_volume_ratio_min", "limit_up_is_volume_expand"}:
+        base_days = int(params.get("base_days", 5))
+        ratio = _limit_up_volume_ratio_expression(
+            as_of, start, str(params.get("mode", "close")), base_days
+        )
+        if field == "limit_up_volume_ratio_min":
+            return ratio
+        # 布尔口径：最近窗口内既有涨停、且该涨停是放量（比值 >= VOLUME_EXPAND_RATIO）。
+        # 用 is_(true) 复用 COUNT 子查询，避免相关子查询被重复展开。
+        return and_(
+            _limit_up_exists_expression(start, as_of, str(params.get("mode", "close"))).is_(
+                True
+            ),
+            ratio >= VOLUME_EXPAND_RATIO,
+        )
     if field == "avg_amount":
         return (
             select(func.avg(DailyBar.amount))
@@ -297,6 +383,27 @@ def _factor_expression(
     }
     if key in bar_fields:
         return bar_fields[key]
+
+    # 开盘/日内形态：都基于最近一个交易日的开高低收与前收盘。
+    open_price = latest_bar.c.open
+    close_price = latest_bar.c.close
+    preclose = latest_bar.c.preclose
+    if key == "open_gap_pct":
+        return (
+            (open_price / func.nullif(preclose, 0) - 1) * 100
+        )
+    if key == "open_gap_up":
+        return open_price > preclose
+    if key == "open_gap_down":
+        return open_price < preclose
+    if key == "intraday_change_pct":
+        return (
+            (close_price / func.nullif(open_price, 0) - 1) * 100
+        )
+    if key == "open_gap_low_close":
+        return and_(open_price > preclose, close_price < open_price)
+    if key == "open_gap_high_close":
+        return and_(open_price < preclose, close_price > open_price)
     holder_fields = {
         "holder_num": latest_holder.c.holder_num,
         "holder_change_pct": latest_holder.c.holder_change_pct,
@@ -378,14 +485,24 @@ def _normalize_condition(
     return factor, params, value
 
 
-def build_screen(
-    db: Session,
-    request: ScreenRequest,
-    *,
-    max_window_days: int,
-    statement_timeout_ms: int,
-) -> dict[str, Any]:
-    as_of = _resolve_as_of(db, request.as_of)
+def _connection_as_of(db: Session, requested: date | None) -> date:
+    """仅供对比接口使用：拿不到交易日历时退化为请求日期或今天。"""
+
+    try:
+        return _resolve_as_of(db, requested)
+    except ScreenError:
+        return requested or _today()
+
+
+def _apply_statement_timeout(db: Session, statement_timeout_ms: int) -> None:
+    # SET LOCAL 只有 PostgreSQL 支持；SQLite（测试库）跳过。
+    if db.get_bind().dialect.name != "postgresql":
+        return
+    timeout = max(1000, int(statement_timeout_ms))
+    db.execute(text(f"SET LOCAL statement_timeout = {timeout}"))
+
+
+def _latest_ctes(as_of: date):
     latest_bar = (
         select(
             DailyBar.instrument_id.label("instrument_id"),
@@ -393,6 +510,10 @@ def build_screen(
             DailyBar.close.label("close"),
             DailyBar.close_adj.label("close_adj"),
             DailyBar.pct_chg.label("pct_chg"),
+            DailyBar.open.label("open"),
+            DailyBar.high.label("high"),
+            DailyBar.low.label("low"),
+            DailyBar.preclose.label("preclose"),
             DailyBar.pe_ttm.label("pe_ttm"),
             DailyBar.pb.label("pb"),
             DailyBar.turnover_rate.label("turnover_rate"),
@@ -444,6 +565,18 @@ def build_screen(
         )
         .cte("latest_fin")
     )
+    return latest_bar, latest_holder, latest_fin
+
+
+def build_screen(
+    db: Session,
+    request: ScreenRequest,
+    *,
+    max_window_days: int,
+    statement_timeout_ms: int,
+) -> dict[str, Any]:
+    as_of = _resolve_as_of(db, request.as_of)
+    latest_bar, latest_holder, latest_fin = _latest_ctes(as_of)
 
     predicates = []
     extra_columns: dict[str, Any] = {}
@@ -578,8 +711,7 @@ def build_screen(
     offset = (request.page - 1) * request.page_size
     statement = statement.offset(offset).limit(request.page_size)
 
-    timeout = max(1000, int(statement_timeout_ms))
-    db.execute(text(f"SET LOCAL statement_timeout = {timeout}"))
+    _apply_statement_timeout(db, statement_timeout_ms)
     total = int(db.scalar(count_statement) or 0)
     rows = [
         {key: value for key, value in row.items()}
@@ -593,3 +725,234 @@ def build_screen(
         "rows": rows,
         "extra_fields": extra_fields,
     }
+
+VERDICT_UNKNOWN = "unknown"
+
+
+def _coerce_number(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def evaluate_condition(
+    factor: FactorSpec,
+    op: str,
+    target: Any,
+    actual: Any,
+) -> tuple[str, float | None, str]:
+    """判断单条条件是否满足，并给出与目标的差距。
+
+    返回 (verdict, gap, reason)：verdict 为 pass / fail / unknown；gap 表示
+    实际值离满足条件还差多少（已满足或无法判断时为 None）；reason 是给用户看
+    的简短说明，例如「低于下限 3.20」或「缺少该项数据，无法判断」。
+    """
+
+    if actual is None:
+        return VERDICT_UNKNOWN, None, "缺少该项数据，无法判断"
+
+    if factor.value_type == "bool":
+        if op == "eq":
+            satisfied = bool(actual) is bool(target)
+        elif op == "ne":
+            satisfied = bool(actual) is not bool(target)
+        else:  # pragma: no cover - registry 已限制操作符
+            raise FactorError(f"unsupported operator: {op}")
+        label = "是" if bool(actual) else "否"
+        return ("pass" if satisfied else "fail"), None, f"当前为「{label}」"
+
+    if factor.value_type == "string":
+        text = str(actual)
+        expected = target if isinstance(target, list) else [target]
+        expected_texts = [str(item) for item in expected]
+        if op == "eq":
+            satisfied = text == expected_texts[0]
+        elif op == "ne":
+            satisfied = text != expected_texts[0]
+        elif op == "in":
+            satisfied = text in expected_texts
+        elif op == "contains":
+            satisfied = expected_texts[0].lower() in text.lower()
+        else:  # pragma: no cover - registry 已限制操作符
+            raise FactorError(f"unsupported operator: {op}")
+        return ("pass" if satisfied else "fail"), None, f"当前为「{text}」"
+
+    number = _coerce_number(actual)
+    if number is None:
+        if op == "gte" and float(target) <= 0:
+            # 计数类条件（例如「涨停次数 ≥ 0」）没有记录本身就是 0 次，可以满足。
+            return "pass", 0.0, "没有记录（按 0 计）"
+        return VERDICT_UNKNOWN, None, "缺少该项数据，无法判断"
+
+    def gapped(value: float, text: str) -> tuple[str, float, str]:
+        # 数值差距去掉浮点噪声（例如 2.5000000000000004 -> 2.5）。
+        gap = float(f"{abs(value):.4g}")
+        return "fail", gap, f"{text} {gap:g}"
+
+    if op == "between":
+        low, high = float(target[0]), float(target[1])
+        if low <= number <= high:
+            return "pass", 0.0, "在目标区间内"
+        if number < low:
+            return gapped(low - number, "低于下限")
+        return gapped(number - high, "高于上限")
+    if op == "in" and factor.value_type == "number":
+        allowed = {float(item) for item in target}
+        if number in allowed:
+            return "pass", 0.0, "在目标取值内"
+        return "fail", None, "不在目标取值内"
+    limit = float(target)
+    if op == "gt":
+        satisfied, gap = number > limit, limit - number
+    elif op == "gte":
+        satisfied, gap = number >= limit, limit - number
+    elif op == "lt":
+        satisfied, gap = number < limit, number - limit
+    elif op == "lte":
+        satisfied, gap = number <= limit, number - limit
+    elif op == "eq":
+        satisfied, gap = number == limit, abs(number - limit)
+    elif op == "ne":
+        satisfied, gap = number != limit, 1.0
+    else:  # pragma: no cover - registry 已限制操作符
+        raise FactorError(f"unsupported operator: {op}")
+    if satisfied:
+        return "pass", 0.0, "已满足"
+    return "fail", abs(gap), "已不满足"
+
+
+def _limit_counts(
+    db: Session, instrument_id: int, as_of: date, days: int
+) -> dict[str, int]:
+    start = _window_start(db, as_of, days)
+    up = down = 0
+    for direction in db.scalars(
+        select(LimitEvent.direction).where(
+            LimitEvent.instrument_id == instrument_id,
+            LimitEvent.trade_date >= start,
+            LimitEvent.trade_date <= as_of,
+        )
+    ):
+        if direction == "up":
+            up += 1
+        elif direction == "down":
+            down += 1
+    return {"up": up, "down": down}
+
+
+def compare_instrument(
+    db: Session,
+    *,
+    symbol: str,
+    request: ScreenRequest,
+    max_window_days: int,
+    statement_timeout_ms: int,
+) -> dict[str, Any]:
+    """检查单个标的是否满足全部筛选条件，并列出不满足的条件。"""
+
+    instrument = db.scalar(select(Instrument).where(Instrument.symbol == symbol))
+    if instrument is None:
+        raise ScreenError("证券不存在")
+    if instrument.asset_type != "stock" or instrument.status != "active":
+        raise ScreenError("该标的不是可筛选的在市标的")
+
+    as_of = _connection_as_of(db, request.as_of)
+    latest_bar, latest_holder, latest_fin = _latest_ctes(as_of)
+
+    evaluated: list[tuple[ConditionIn, FactorSpec, dict[str, Any], Any]] = []
+    extra_columns: list[Any] = []
+    for index, condition in enumerate(request.conditions):
+        factor, params, value = _normalize_condition(
+            condition, max_window_days=max_window_days
+        )
+        expression = _factor_expression(
+            db, factor, params, as_of, latest_bar, latest_holder, latest_fin
+        )
+        alias = f"c{index}"
+        extra_columns.append(expression.label(alias))
+        evaluated.append((condition, factor, params, value))
+
+    statement = (
+        select(*extra_columns)
+        .select_from(Instrument)
+        .outerjoin(latest_bar, latest_bar.c.instrument_id == Instrument.id)
+        .outerjoin(latest_holder, latest_holder.c.instrument_id == Instrument.id)
+        .outerjoin(latest_fin, latest_fin.c.instrument_id == Instrument.id)
+        .where(Instrument.id == instrument.id)
+    )
+    _apply_statement_timeout(db, statement_timeout_ms)
+    raw = db.execute(statement).mappings().first()
+
+    limit_windows = {
+        int(params["days"])
+        for _, factor, params, _ in evaluated
+        if factor.key in {"limit_up_count", "limit_down_count"}
+    }
+    limit_counts = {
+        days: _limit_counts(db, instrument.id, as_of, days)
+        for days in sorted(limit_windows)
+    }
+
+    results: list[dict[str, Any]] = []
+    passed = failed = unknown = 0
+    for index, (condition, factor, params, value) in enumerate(evaluated):
+        actual = raw.get(f"c{index}") if raw is not None else None
+        verdict, gap, reason = evaluate_condition(
+            factor, condition.op, value, actual
+        )
+        if verdict == "pass":
+            passed += 1
+        elif verdict == "fail":
+            failed += 1
+        else:
+            unknown += 1
+        item: dict[str, Any] = {
+            "field": factor.key,
+            "label": factor.label,
+            "category": factor.category,
+            "category_label": CATEGORY_LABELS.get(
+                factor.category, factor.category
+            ),
+            "op": condition.op,
+            "target": value,
+            "params": params,
+            "actual": actual,
+            "verdict": verdict,
+            "gap": gap,
+            "reason": reason,
+        }
+        if factor.key in {"limit_up_count", "limit_down_count"}:
+            counts = limit_counts.get(int(params["days"]))
+            if counts:
+                item["detail"] = {
+                    "days": int(params["days"]),
+                    "up": counts["up"],
+                    "down": counts["down"],
+                    "mode": str(params.get("mode", "close")),
+                }
+        results.append(item)
+
+    # 与筛选口径一致：全部满足（and）或任一满足（or）；缺数据的条件不算满足。
+    matches = (
+        passed == len(results)
+        if request.logic == "and"
+        else passed > 0
+    )
+    return {
+        "symbol": instrument.symbol,
+        "code": instrument.code,
+        "name": instrument.name,
+        "board": instrument.board,
+        "industry": instrument.industry,
+        "as_of": as_of.isoformat(),
+        "logic": request.logic,
+        "matches": matches,
+        "passed": passed,
+        "failed": failed,
+        "unknown": unknown,
+        "conditions": results,
+    }
+

@@ -53,6 +53,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
+import { ScreenCompareCard } from "@/components/ScreenCompareCard"
+import type { DraftCondition } from "@/components/ScreenCompareCard"
 import { api, ApiError } from "@/lib/api"
 import { formatFactorValue, pctTone } from "@/lib/format"
 import type {
@@ -87,13 +89,7 @@ const MODE_LABELS: Record<string, string> = {
   one_word: "一字",
 }
 
-export interface DraftCondition {
-  id: string
-  field: string
-  op: string
-  value: unknown
-  params: Record<string, unknown>
-}
+export type { DraftCondition } from "@/components/ScreenCompareCard"
 
 export function newId(): string {
   return typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -139,6 +135,9 @@ function defaultSingleValue(factor: FactorMeta): unknown {
     window_price_range_pct: 30,
     recent_price_amplitude_ratio: 3,
     holder_num: 50_000,
+    open_gap_pct: 3,
+    intraday_change_pct: -3,
+    limit_up_volume_ratio_min: 1.5,
   }
   return values[factor.key] ?? 0
 }
@@ -844,6 +843,19 @@ export function ScreenerPage() {
           ) : null}
         </CardContent>
       </Card>
+
+      <ScreenCompareCard
+        conditions={conditions}
+        logic={logic}
+        factors={factors}
+        factorMap={factorMap}
+        onLogicChange={setLogic}
+        onAdjustCondition={(conditionId, next) =>
+          setConditions((previous) =>
+            previous.map((item) => (item.id === conditionId ? next : item)),
+          )
+        }
+      />
 
       {result ? (
         <>

@@ -12,6 +12,7 @@ PipelineName = Literal[
     "financial",
     "financial_morning",
     "weekly",
+    "daily_data",
     "daily_report",
 ]
 BackfillSource = Literal["tencent", "baostock", "full"]

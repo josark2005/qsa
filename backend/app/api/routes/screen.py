@@ -24,6 +24,7 @@ from app.models.user import User
 from app.screening.query_builder import (
     ScreenError,
     build_screen,
+    compare_instrument,
 )
 from app.screening.registry import (
     CATEGORY_LABELS,
@@ -31,6 +32,8 @@ from app.screening.registry import (
     factor_metadata,
 )
 from app.schemas.screening import (
+    CompareRequest,
+    CompareResponse,
     FactorListResponse,
     ScreenRequest,
     ScreenResponse,
@@ -132,3 +135,37 @@ def run_screen(
         except RedisError:
             logger.warning("screen cache write failed", exc_info=True)
     return response
+
+
+@router.post("/screen/compare", response_model=CompareResponse)
+def compare_screen(
+    payload: CompareRequest,
+    user: User = Depends(require_ready_user),
+    db: Session = Depends(get_db),
+    container: Container = Depends(get_container),
+) -> CompareResponse:
+    """检查单个标的是否满足当前条件，并列出不满足的条件（不占筛选配额）。"""
+
+    snapshot = container.settings_service.snapshot
+    if snapshot.get_bool("maintenance.enabled") and user.role != "admin":
+        raise api_error(503, "maintenance", "系统维护中，请稍后再试")
+
+    request = ScreenRequest(
+        as_of=payload.as_of,
+        logic=payload.logic,
+        conditions=payload.conditions,
+        sort=[],
+        page=1,
+        page_size=1,
+    )
+    try:
+        result = compare_instrument(
+            db,
+            symbol=payload.symbol.strip(),
+            request=request,
+            max_window_days=snapshot.get_int("screening.max_window_days"),
+            statement_timeout_ms=snapshot.get_int("screening.statement_timeout_ms"),
+        )
+    except (FactorError, ScreenError) as exc:
+        raise api_error(422, "compare_invalid", str(exc)) from None
+    return CompareResponse.model_validate(result)

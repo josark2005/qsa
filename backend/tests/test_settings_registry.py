@@ -18,9 +18,13 @@ def test_defaults_are_valid() -> None:
     validate_settings_map(values)
 
 
-def test_daily_report_runs_at_16() -> None:
+def test_daily_pipelines_are_scheduled_separately() -> None:
     values = default_values()
-    assert values["sync.pipeline.daily_report.cron"] == "0 16 * * *"
+    # 数据拉取与选股汇报分开调度，默认先拉取（16:00）再汇报（17:00）。
+    assert values["sync.pipeline.daily_data.cron"] == "0 16 * * *"
+    assert values["sync.pipeline.daily_report.cron"] == "0 17 * * *"
+    assert values["sync.pipeline.daily_data.enabled"] is True
+    assert values["sync.pipeline.daily_report.enabled"] is True
 
 
 def test_cron_rejects_too_frequent_schedule() -> None:

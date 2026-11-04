@@ -1,5 +1,7 @@
 import type {
   AuditLogListResponse,
+  CompareRequest,
+  CompareResponse,
   CreateUserPayload,
   LoginResponse,
   MeResponse,
@@ -274,6 +276,13 @@ export const api = {
 
   runScreen(payload: ScreenRequest): Promise<ScreenResponse> {
     return request<ScreenResponse>("/screen", {
+      method: "POST",
+      body: payload,
+    })
+  },
+
+  compareScreen(payload: CompareRequest): Promise<CompareResponse> {
+    return request<CompareResponse>("/screen/compare", {
       method: "POST",
       body: payload,
     })

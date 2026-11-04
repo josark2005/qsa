@@ -52,6 +52,11 @@ SHANGHAI = ZoneInfo("Asia/Shanghai")
 # 等待行情落定时按小片 sleep，保证停止请求能在一秒级内生效。
 WAIT_SLICE_SECONDS = 5.0
 
+# 每日流水线分两段独立调度：先拉取数据，再按默认条件筛选并汇报。
+DATA_PIPELINE = "daily_data"
+REPORT_PIPELINE = "daily_report"
+DAILY_PIPELINES = (DATA_PIPELINE, REPORT_PIPELINE)
+
 
 def _missing_symbols(
     db: Session,
@@ -114,8 +119,7 @@ def _notify(
     targets: list[ChatTarget],
     text: str,
 ) -> None:
-    # 机器人未启用或未配置时直接跳过，不要尝试登录/发送。
-    if client is None or not client.configured:
+    if not _client_ready(client):
         return
     for target in targets:
         try:
@@ -131,7 +135,7 @@ def _notify_personal(
 ) -> bool:
     """向个人号 OneBot 群推送纯文本；任何失败都只记录日志，不影响官方流程。"""
 
-    if client is None or not client.configured or not targets:
+    if not _client_ready(client) or not targets:
         return False
     sent = False
     for target in targets:
@@ -144,6 +148,12 @@ def _notify_personal(
                 target.openid,
             )
     return sent
+
+
+def _client_ready(client: Any) -> bool:
+    """机器人未启用或未配置时不要尝试登录/发送。"""
+
+    return client is not None and bool(getattr(client, "configured", False))
 
 
 def _coverage(
@@ -292,31 +302,18 @@ def _wait_for_market_data(
         )
 
 
-def run_daily_report_pipeline(
-    db: Session,
-    session_factory: sessionmaker,
-    *,
-    target_date: date,
-    settings: SettingsService,
-    redis_client: Any,
-    trigger: str = "schedule",
-    cancel_check=None,
-    progress_callback: Callable[[dict], None] | None = None,
-) -> dict[str, Any]:
+def _notify_settings(settings: SettingsService, redis_client: Any):
+    """按设置构造通知用的 QQ 客户端；未启用的通道一律返回空。"""
+
     config = get_config()
-    run_id = uuid.uuid4()
     snapshot = settings.snapshot
-    # 先检查两个机器人通道是否启用：未启用的通道不构造客户端、不读取订阅群，
-    # 后续所有推送都会被跳过，避免对关闭的机器人发起登录或发送。
     official_enabled = snapshot.get_bool("qq_bot.enabled")
     personal_enabled = snapshot.get_bool("personal_qq.enabled")
     client: QQBotClient | None = None
     official_ready = False
     targets: list[ChatTarget] = []
     if official_enabled:
-        app_id = (
-            snapshot.get_str("qq_bot.app_id") or config.qq_bot_app_id
-        ).strip()
+        app_id = (snapshot.get_str("qq_bot.app_id") or config.qq_bot_app_id).strip()
         app_secret = (
             snapshot.get_str("qq_bot.app_secret") or config.qq_bot_app_secret
         ).strip()
@@ -327,21 +324,35 @@ def run_daily_report_pipeline(
             api_base=config.qq_bot_api_base,
         )
         official_ready = client.configured
-        targets = _subscribed_targets(db) if official_ready else []
     personal_client: OneBotClient | None = None
-    personal_groups: list[ChatTarget] = []
     if personal_enabled:
         personal_client = build_onebot_client(snapshot, redis_client, config)
-        personal_groups = list_personal_targets(db)
+    return {
+        "config": config,
+        "snapshot": snapshot,
+        "official_enabled": official_enabled,
+        "official_ready": official_ready,
+        "client": client,
+        "personal_enabled": personal_enabled,
+        "personal_client": personal_client,
+    }
+
+
+def _step_runner(
+    db: Session,
+    session_factory: sessionmaker,
+    *,
+    pipeline: str,
+    target_date: date,
+    trigger: str,
+    cancel_check,
+    progress_callback: Callable[[dict], None] | None,
+):
+    """返回 (results, errors, run_step)：统一记录 StepRun 与错误。"""
+
+    run_id = uuid.uuid4()
     results: dict[str, Any] = {}
     errors: dict[str, str] = {}
-    personal_notified = False
-
-    _notify(
-        client,
-        targets,
-        f"QSA 每日数据拉取开始\n目标交易日：{target_date.isoformat()}",
-    )
 
     def run_step(step: str, function):
         if cancel_check is not None and cancel_check():
@@ -353,7 +364,7 @@ def run_daily_report_pipeline(
         try:
             with StepRun(
                 session_factory,
-                pipeline="daily_report",
+                pipeline=pipeline,
                 step=step,
                 run_id=run_id,
                 target_date=target_date,
@@ -373,23 +384,81 @@ def run_daily_report_pipeline(
         except Exception as exc:
             db.rollback()
             errors[step] = f"{type(exc).__name__}: {exc}"
-            logger.exception("daily report step failed: %s", step)
+            logger.exception("%s step failed: %s", pipeline, step)
             return None
 
-    def bar_progress(phase: str):
-        def callback(update: dict) -> None:
-            if cancel_check is not None and cancel_check():
-                raise SyncCancelled("用户停止任务")
-            if progress_callback is not None:
-                progress_callback(
-                    {
-                        **update,
-                        "phase": phase,
-                        "message": f"{phase} 同步中",
-                    }
-                )
+    return results, errors, run_step
 
-        return callback
+
+def _bar_progress(
+    phase: str,
+    *,
+    cancel_check,
+    progress_callback: Callable[[dict], None] | None,
+):
+    def callback(update: dict) -> None:
+        if cancel_check is not None and cancel_check():
+            raise SyncCancelled("用户停止任务")
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    **update,
+                    "phase": phase,
+                    "message": f"{phase} 同步中",
+                }
+            )
+
+    return callback
+
+
+def run_daily_data_pipeline(
+    db: Session,
+    session_factory: sessionmaker,
+    *,
+    target_date: date,
+    settings: SettingsService,
+    redis_client: Any,
+    trigger: str = "schedule",
+    cancel_check=None,
+    progress_callback: Callable[[dict], None] | None = None,
+) -> dict[str, Any]:
+    """只负责拉取数据：行情、涨跌停、财报/股东与关注标的公告，不做筛选推送。"""
+
+    context = _notify_settings(settings, redis_client)
+    config = context["config"]
+    snapshot = context["snapshot"]
+    client: QQBotClient | None = context["client"]
+    official_ready = bool(context["official_ready"])
+    personal_client: OneBotClient | None = context["personal_client"]
+    targets = _subscribed_targets(db) if official_ready else []
+    personal_groups = (
+        list_personal_targets(db)
+        if context["personal_enabled"]
+        else []
+    )
+
+    results, errors, run_step = _step_runner(
+        db,
+        session_factory,
+        pipeline=DATA_PIPELINE,
+        target_date=target_date,
+        trigger=trigger,
+        cancel_check=cancel_check,
+        progress_callback=progress_callback,
+    )
+
+    _notify(
+        client,
+        targets,
+        f"QSA 每日数据拉取开始\n目标交易日：{target_date.isoformat()}",
+    )
+
+    def bar_progress(phase: str):
+        return _bar_progress(
+            phase,
+            cancel_check=cancel_check,
+            progress_callback=progress_callback,
+        )
 
     run_step(
         "calendar",
@@ -404,7 +473,7 @@ def run_daily_report_pipeline(
     run_step("universe", lambda: sync_universe(db))
 
     # 15:00 收盘后立即触发时，先等当日行情落定（15:05）再拉取，
-    # 保证筛选和推送用的是当天已落定的数据，而不是昨天的旧数据。
+    # 保证后续筛选和推送用的是当天已落定的数据，而不是昨天的旧数据。
     _wait_for_market_data(
         target_date,
         cancel_check=cancel_check,
@@ -539,7 +608,7 @@ def run_daily_report_pipeline(
         "shareholders",
         lambda: sync_shareholder_counts(db, periods=["最新", *periods]),
     )
-    # 关注标的的财报/股东户数公告：同步完成后推送到已订阅的群（失败不影响主流程）。
+    # 关注标的的财报/股东户数公告：数据同步完成后推送到已订阅的群（失败不影响主流程）。
     run_step(
         "watch_notify",
         lambda: notify_watch_announcements(
@@ -573,12 +642,88 @@ def run_daily_report_pipeline(
         _notify(
             client,
             targets,
-            f"QSA 每日选股未推送：数据校验未通过。\n{readiness}",
+            f"QSA 每日数据拉取完成，但数据校验未通过，稍后的群汇报会跳过。\n{readiness}",
+        )
+        _notify_personal(
+            personal_client,
+            personal_groups,
+            f"QSA 每日数据拉取完成，但数据校验未通过，稍后的群汇报会跳过。\n{readiness}",
+        )
+    elif errors:
+        _notify(
+            client,
+            targets,
+            f"每日数据拉取完成，但有 {len(errors)} 个步骤异常："
+            + "、".join(errors.keys()),
+        )
+        _notify_personal(
+            personal_client,
+            personal_groups,
+            f"每日数据拉取完成，但有 {len(errors)} 个步骤异常："
+            + "、".join(errors.keys()),
+        )
+
+    return {
+        "target_date": target_date.isoformat(),
+        "data_ready": ready,
+        "readiness": readiness,
+        "missing": {
+            "stock": len(missing_stock),
+            "etf": len(missing_etf),
+            "bse": len(missing_bse),
+        },
+        "errors": errors,
+    }
+
+
+def run_daily_report_pipeline(
+    db: Session,
+    session_factory: sessionmaker,
+    *,
+    target_date: date,
+    settings: SettingsService,
+    redis_client: Any,
+    trigger: str = "schedule",
+    cancel_check=None,
+    progress_callback: Callable[[dict], None] | None = None,
+) -> dict[str, Any]:
+    """只负责汇报：按默认条件筛选、生成报表并推送到已启用的群。"""
+
+    context = _notify_settings(settings, redis_client)
+    config = context["config"]
+    snapshot = context["snapshot"]
+    official_enabled = bool(context["official_enabled"])
+    official_ready = bool(context["official_ready"])
+    personal_enabled = bool(context["personal_enabled"])
+    client: QQBotClient | None = context["client"]
+    personal_client: OneBotClient | None = context["personal_client"]
+    targets = _subscribed_targets(db) if official_ready else []
+    personal_groups = (
+        list_personal_targets(db) if personal_enabled else []
+    )
+
+    results, errors, run_step = _step_runner(
+        db,
+        session_factory,
+        pipeline=REPORT_PIPELINE,
+        target_date=target_date,
+        trigger=trigger,
+        cancel_check=cancel_check,
+        progress_callback=progress_callback,
+    )
+    personal_notified = False
+
+    ready, readiness = _data_ready(db, target_date)
+    if not ready:
+        _notify(
+            client,
+            targets,
+            f"QSA 每日汇报未推送：数据校验未通过。\n{readiness}",
         )
         personal_notified = _notify_personal(
             personal_client,
             personal_groups,
-            f"QSA 每日选股未推送：数据校验未通过。\n{readiness}",
+            f"QSA 每日汇报未推送：数据校验未通过。\n{readiness}",
         )
         return {
             "target_date": target_date.isoformat(),
@@ -596,6 +741,10 @@ def run_daily_report_pipeline(
         }
 
     report = None
+    if progress_callback is not None:
+        progress_callback(
+            {"phase": "screening", "message": "按默认条件筛选", "percent": 0}
+        )
     try:
         report = create_report_snapshot(
             db,
@@ -603,7 +752,7 @@ def run_daily_report_pipeline(
             conditions=_default_conditions(settings),
             sorts=[],
             owner_id=None,
-            title=f"每日选股 {target_date.isoformat()}",
+            title=f"每日汇报 {target_date.isoformat()}",
             as_of=target_date,
             max_window_days=snapshot.get_int("screening.max_window_days"),
             statement_timeout_ms=snapshot.get_int(
@@ -627,13 +776,13 @@ def run_daily_report_pipeline(
         _notify(
             client,
             targets,
-            f"QSA 每日选股完成\n交易日：{target_date.isoformat()}\n"
+            f"QSA 每日汇报完成\n交易日：{target_date.isoformat()}\n"
             f"入选：{report.total} 只\n报表：{link}\n{detail}",
         )
         personal_notified = _notify_personal(
             personal_client,
             personal_groups,
-            f"QSA 每日选股完成\n交易日：{target_date.isoformat()}\n"
+            f"QSA 每日汇报完成\n交易日：{target_date.isoformat()}\n"
             f"入选：{report.total} 只\n报表：{link}\n"
             "（个人号通道，PDF 请打开链接查看）",
         )
@@ -679,36 +828,17 @@ def run_daily_report_pipeline(
     except Exception as exc:
         logger.exception("daily report generation failed")
         errors["report"] = f"{type(exc).__name__}: {exc}"
-        _notify(client, targets, f"QSA 每日选股失败：{exc}")
+        _notify(client, targets, f"QSA 每日汇报失败：{exc}")
         personal_notified = _notify_personal(
             personal_client,
             personal_groups,
-            f"QSA 每日选股失败：{exc}",
-        )
-
-    if errors:
-        _notify(
-            client,
-            targets,
-            f"每日拉取完成，但有 {len(errors)} 个步骤异常："
-            + "、".join(errors.keys()),
-        )
-        _notify_personal(
-            personal_client,
-            personal_groups,
-            f"每日拉取完成，但有 {len(errors)} 个步骤异常："
-            + "、".join(errors.keys()),
+            f"QSA 每日汇报失败：{exc}",
         )
 
     return {
         "target_date": target_date.isoformat(),
         "data_ready": True,
         "readiness": readiness,
-        "missing": {
-            "stock": len(missing_stock),
-            "etf": len(missing_etf),
-            "bse": len(missing_bse),
-        },
         "report_token": report.token if report is not None else None,
         "subscribed_groups": len(targets),
         "personal_groups": len(personal_groups),

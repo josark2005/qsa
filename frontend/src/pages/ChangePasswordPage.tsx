@@ -69,7 +69,7 @@ export function ChangePasswordPage() {
               <AlertTriangle className="size-4" />
               <AlertTitle>需要先修改密码</AlertTitle>
               <AlertDescription>
-                当前账号仍使用临时密码，修改后才能进入选股工作台。
+                当前账号仍使用临时密码，修改后才能进入 QSA工作台。
               </AlertDescription>
             </Alert>
           ) : null}

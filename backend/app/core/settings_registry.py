@@ -406,28 +406,53 @@ SETTING_SPECS: tuple[SettingSpec, ...] = (
         tags=("pipeline", "cron"),
     ),
     SettingSpec(
-        key="sync.pipeline.daily_report.enabled",
-        label="每日数据拉取与群汇报",
+        key="sync.pipeline.daily_data.enabled",
+        label="每日数据拉取",
         group="sync",
         type="bool",
         default=True,
         description=(
-            "每天收盘后先拉取目标交易日的行情，再用默认条件筛选并推送到"
-            "已启用的 QQ 机器人频道；官方/个人号机器人未启用时跳过对应推送。"
+            "每天收盘后拉取目标交易日的行情、涨跌停、财报/股东与关注标的公告"
+            "（默认 16:00），不负责筛选和群汇报。"
+        ),
+        order=103,
+        tags=("pipeline",),
+    ),
+    SettingSpec(
+        key="sync.pipeline.daily_data.cron",
+        label="每日数据拉取 cron",
+        group="sync",
+        type="cron",
+        default="0 16 * * *",
+        description=(
+            "每日数据拉取执行时间，时区 Asia/Shanghai。15:00 收盘后触发时会先等"
+            "当日行情落定（15:05）再拉取；请在群汇报之前执行。"
+        ),
+        order=104,
+        tags=("pipeline", "cron"),
+    ),
+    SettingSpec(
+        key="sync.pipeline.daily_report.enabled",
+        label="每日选股汇报",
+        group="sync",
+        type="bool",
+        default=True,
+        description=(
+            "在每日数据拉取完成后，用默认条件筛选并推送到已启用的 QQ 机器人频道；"
+            "官方/个人号机器人未启用时跳过对应推送，数据校验未通过时不推送。"
         ),
         order=105,
         tags=("pipeline",),
     ),
     SettingSpec(
         key="sync.pipeline.daily_report.cron",
-        label="每日数据拉取 cron",
+        label="每日选股汇报 cron",
         group="sync",
         type="cron",
-        default="0 16 * * *",
+        default="0 17 * * *",
         description=(
-            "每日数据拉取与 QQ 群汇报执行时间，时区 Asia/Shanghai。"
-            "15:00 收盘后触发时会先等当日行情落定（15:05）再拉取，"
-            "拉取并校验通过后才筛选推送。"
+            "每日选股汇报执行时间，时区 Asia/Shanghai。建议排在每日数据拉取之后，"
+            "数据校验通过才会推送。"
         ),
         order=106,
         tags=("pipeline", "cron"),

@@ -25,7 +25,12 @@ from app.sync.calendar import (
     sync_trading_calendar,
 )
 from app.sync.cancellation import SyncCancelled
-from app.sync.daily_report import run_daily_report_pipeline
+from app.sync.daily_report import (
+    DATA_PIPELINE,
+    REPORT_PIPELINE,
+    run_daily_data_pipeline,
+    run_daily_report_pipeline,
+)
 from app.sync.financials import (
     quarter_ends,
     sync_financial_reports,
@@ -44,8 +49,11 @@ PIPELINE_NAMES = (
     "financial",
     "financial_morning",
     "weekly",
-    "daily_report",
+    DATA_PIPELINE,
+    REPORT_PIPELINE,
 )
+# 每日流水线分两段：先拉数据（daily_data），再筛选汇报（daily_report）。
+DAILY_PIPELINES = (DATA_PIPELINE, REPORT_PIPELINE)
 
 
 def today_shanghai() -> date:
@@ -580,7 +588,7 @@ def run_pipeline(
     with session_factory() as db:
         ensure_calendar(db)
         today = today_shanghai()
-        if name == "daily_report":
+        if name in DAILY_PIPELINES:
             cutoff = daily_report_cutoff(today, datetime.now(SHANGHAI))
             current_target = target_date or latest_trading_day(db, cutoff) or cutoff
         else:
@@ -595,10 +603,15 @@ def run_pipeline(
         if not acquired:
             return {"skipped": True, "reason": "lock_held"}
         with session_factory() as db:
-            if name == "daily_report":
+            if name in DAILY_PIPELINES:
                 if settings_service is None or redis_client is None:
-                    raise ValueError("daily_report requires settings and redis")
-                return run_daily_report_pipeline(
+                    raise ValueError(f"{name} requires settings and redis")
+                runner = (
+                    run_daily_data_pipeline
+                    if name == DATA_PIPELINE
+                    else run_daily_report_pipeline
+                )
+                return runner(
                     db,
                     session_factory,
                     target_date=current_target,

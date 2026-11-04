@@ -122,6 +122,14 @@ DAYS_RANGE = ParamSpec(
     minimum=20,
     maximum=2500,
 )
+VOLUME_BASE_DAYS = ParamSpec(
+    name="base_days",
+    label="均量窗口",
+    type="int",
+    default=5,
+    minimum=2,
+    maximum=30,
+)
 YEARS_RANGE = ParamSpec(
     name="years",
     label="年数",
@@ -378,6 +386,88 @@ FACTORS: tuple[FactorSpec, ...] = (
         unit="倍",
         value_min=0.0,
         params=(DAYS_LIMIT, LIMIT_MODE),
+    ),
+    FactorSpec(
+        key="open_gap_pct",
+        label="开盘涨跌幅",
+        category="price",
+        value_type="number",
+        ops=NUMERIC_OPS,
+        description=(
+            "最近一个交易日开盘价相对前收盘价的涨跌幅，单位 %；"
+            "5 表示高开 5%。"
+        ),
+        unit="%",
+    ),
+    FactorSpec(
+        key="open_gap_up",
+        label="高开",
+        category="price",
+        value_type="bool",
+        ops=BOOL_OPS,
+        description="最近一个交易日开盘价高于前收盘价（高开）。",
+    ),
+    FactorSpec(
+        key="open_gap_down",
+        label="低开",
+        category="price",
+        value_type="bool",
+        ops=BOOL_OPS,
+        description="最近一个交易日开盘价低于前收盘价（低开）。",
+    ),
+    FactorSpec(
+        key="intraday_change_pct",
+        label="日内涨跌",
+        category="price",
+        value_type="number",
+        ops=NUMERIC_OPS,
+        description=(
+            "最近一个交易日收盘价相对开盘价的涨跌幅，单位 %；"
+            "-3 表示收盘比开盘低 3%。"
+        ),
+        unit="%",
+    ),
+    FactorSpec(
+        key="open_gap_low_close",
+        label="高开低走",
+        category="price",
+        value_type="bool",
+        ops=BOOL_OPS,
+        description="最近一个交易日高开（开盘高于前收）且收阴（收盘低于开盘）。",
+    ),
+    FactorSpec(
+        key="open_gap_high_close",
+        label="低开高走",
+        category="price",
+        value_type="bool",
+        ops=BOOL_OPS,
+        description="最近一个交易日低开（开盘低于前收）且收阳（收盘高于开盘）。",
+    ),
+    FactorSpec(
+        key="limit_up_volume_ratio_min",
+        label="涨停放量倍数",
+        category="limit",
+        value_type="number",
+        ops=NUMERIC_OPS,
+        description=(
+            "最近 N 个交易日首次涨停当天的成交量相对其一贯成交量（前 M 个交易日"
+            "均量）的倍数；0.8 表示略缩量，1.5 表示放量 50%。"
+        ),
+        unit="倍",
+        value_min=0.0,
+        params=(DAYS_LIMIT, LIMIT_MODE, VOLUME_BASE_DAYS),
+    ),
+    FactorSpec(
+        key="limit_up_is_volume_expand",
+        label="涨停且放量",
+        category="limit",
+        value_type="bool",
+        ops=BOOL_OPS,
+        description=(
+            "最近 N 个交易日内出现过涨停，且涨停日成交量相对一贯均量放大到"
+            "「放量倍数」以上。"
+        ),
+        params=(DAYS_LIMIT, LIMIT_MODE, VOLUME_BASE_DAYS),
     ),
     FactorSpec(
         key="window_price_range_pct",

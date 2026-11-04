@@ -505,7 +505,7 @@ export function PersonalQQCard() {
             <div>
               <div className="text-sm font-medium">推送群</div>
               <div className="text-xs text-muted-foreground">
-                每日选股结果会通过个人号发送到这些群；可先发送测试消息验证链路。
+                每日选股汇报会通过个人号发送到这些群；可先发送测试消息验证链路。
               </div>
             </div>
             <div className="flex items-center gap-2">
@@ -544,7 +544,7 @@ export function PersonalQQCard() {
             <Skeleton className="h-24 w-full" />
           ) : groups.length === 0 ? (
             <div className="rounded-lg border border-dashed px-4 py-6 text-center text-sm text-muted-foreground">
-              暂无推送群。点击“添加群”填写群号后即可接收每日选股结果。
+              暂无推送群。点击“添加群”填写群号后即可接收每日选股汇报。
             </div>
           ) : (
             <div className="overflow-hidden rounded-lg border">
@@ -636,7 +636,7 @@ export function PersonalQQCard() {
             <DialogHeader>
               <DialogTitle>添加推送群</DialogTitle>
               <DialogDescription>
-                填写 QQ 群号，群名可选；添加后即可接收每日选股结果。
+                填写 QQ 群号，群名可选；添加后即可接收每日选股汇报。
               </DialogDescription>
             </DialogHeader>
             <div className="space-y-1.5">
@@ -693,7 +693,7 @@ export function PersonalQQCard() {
             <AlertDialogDescription>
               将不再向「
               {removeTarget?.group_name || removeTarget?.group_id}
-              」推送每日选股结果，不影响群内已有数据。
+              」推送每日选股汇报，不影响群内已有数据。
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

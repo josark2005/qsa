@@ -197,6 +197,52 @@ export interface ScreenRequest {
   page_size: number
 }
 
+export type CompareVerdict = "pass" | "fail" | "unknown"
+
+export interface CompareRequest {
+  symbol: string
+  as_of?: string | null
+  logic: "and" | "or"
+  conditions: ScreenCondition[]
+}
+
+export interface CompareDetail {
+  days: number
+  up: number
+  down: number
+  mode: string
+}
+
+export interface CompareConditionResult {
+  field: string
+  label: string
+  category: string
+  category_label: string
+  op: string
+  target: unknown
+  params: Record<string, unknown>
+  actual: unknown
+  verdict: CompareVerdict
+  gap: number | null
+  reason: string
+  detail?: CompareDetail | null
+}
+
+export interface CompareResponse {
+  symbol: string
+  code: string
+  name: string
+  board: string | null
+  industry: string | null
+  as_of: string
+  logic: "and" | "or"
+  matches: boolean
+  passed: number
+  failed: number
+  unknown: number
+  conditions: CompareConditionResult[]
+}
+
 export interface ScreenExtraField {
   alias: string
   label: string

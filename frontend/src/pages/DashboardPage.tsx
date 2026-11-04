@@ -44,10 +44,10 @@ export function DashboardPage() {
         <Card>
           <CardHeader className="pb-2">
             <CardDescription>同步管道</CardDescription>
-            <CardTitle className="text-lg">6 条</CardTitle>
+            <CardTitle className="text-lg">7 条</CardTitle>
           </CardHeader>
           <CardContent className="text-xs leading-5 text-muted-foreground">
-            行情数据、财报与股东晚间同步、次日补充、周度校正、每日拉取与群汇报。
+            行情数据、财报与股东晚间同步、次日补充、周度校正、每日数据拉取与每日选股汇报。
           </CardContent>
         </Card>
         <Card>

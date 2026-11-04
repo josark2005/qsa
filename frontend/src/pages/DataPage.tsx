@@ -9,6 +9,7 @@ import {
   Loader2,
   Play,
   RefreshCw,
+  Share2,
   Square,
   Users,
   Wrench,
@@ -226,7 +227,8 @@ const PIPELINE_LABELS: Record<string, string> = {
   financial: "财报/股东晚间",
   financial_morning: "财报次日补充",
   weekly: "周度校正",
-  daily_report: "每日拉取与群汇报",
+  daily_data: "每日数据拉取",
+  daily_report: "每日选股汇报",
   manual: "手动任务",
   backfill: "历史回补",
   full_backfill: "全量回补",
@@ -256,6 +258,7 @@ const PIPELINE_OPTIONS = [
   { value: "financial", label: PIPELINE_LABELS.financial },
   { value: "financial_morning", label: PIPELINE_LABELS.financial_morning },
   { value: "weekly", label: PIPELINE_LABELS.weekly },
+  { value: "daily_data", label: PIPELINE_LABELS.daily_data },
   { value: "daily_report", label: PIPELINE_LABELS.daily_report },
 ]
 
@@ -469,7 +472,9 @@ export function DataPage() {
       ["queued", "running", "cancelling"].includes(item.status),
   )
   const activeDaily = runningRequests.some(
-    (item) => item.kind === "pipeline" && item.pipeline === "daily_report",
+    (item) =>
+      item.kind === "pipeline" &&
+      (item.pipeline === "daily_data" || item.pipeline === "daily_report"),
   )
   const activeRepair = runningRequests.some(
     (item) => item.kind === "repair_adj_factors",
@@ -564,7 +569,19 @@ export function DataPage() {
 
   function submitDailyRefresh() {
     if (activeDaily) {
-      toast.error("已有日常回补任务在运行或排队")
+      toast.error("已有每日拉取或汇报任务在运行或排队")
+      return
+    }
+    requestMutation.mutate({
+      kind: "pipeline",
+      pipeline: "daily_data",
+      target_date: null,
+    })
+  }
+
+  function submitDailyReport() {
+    if (activeDaily) {
+      toast.error("已有每日拉取或汇报任务在运行或排队")
       return
     }
     requestMutation.mutate({
@@ -688,31 +705,46 @@ export function DataPage() {
 
       <Card id="daily-section" className="border-primary/30">
         <CardHeader className="pb-3">
-          <CardTitle className="text-base">日常回补</CardTitle>
+          <CardTitle className="text-base">每日拉取与汇报</CardTitle>
           <CardDescription>
-            收盘后先拉取目标交易日缺失的日线数据（含北交所），校验通过后再用默认筛选条件
-            选股，并向已订阅且已启用的 QQ 机器人推送报表链接和 PDF。每日 16:00 自动执行。
+            两段独立执行：「拉取数据」补齐目标交易日缺失的日线（含北交所）、涨跌停与财报/股东，
+            「选股汇报」再用默认条件筛选并推送到已订阅且已启用的 QQ 机器人。
+            默认每天 16:00 拉取、17:00 汇报，可在系统设置里分别调整。
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <p className="text-xs leading-5 text-muted-foreground">
             {activeDaily
-              ? "日常回补任务正在运行或排队。"
+              ? "每日拉取或汇报任务正在运行或排队。"
               : activeRequest
-                ? `当前正在执行：${requestTaskLabel(activeRequest)}。日常回补可并行提交。`
+                ? `当前正在执行：${requestTaskLabel(activeRequest)}。每日拉取可并行提交。`
                 : "不会重拉全部历史；数据校验通过后才会向订阅群推送选股结果。"}
           </p>
-          <Button
-            onClick={submitDailyRefresh}
-            disabled={requestMutation.isPending || activeDaily}
-          >
-            {requestMutation.isPending || activeDaily ? (
-              <Loader2 className="size-4 animate-spin" />
-            ) : (
-              <RefreshCw className="size-4" />
-            )}
-            {activeDaily ? "日常回补执行中" : "执行日常回补"}
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              variant="outline"
+              onClick={submitDailyReport}
+              disabled={requestMutation.isPending || activeDaily}
+            >
+              {requestMutation.isPending || activeDaily ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Share2 className="size-4" />
+              )}
+              执行选股汇报
+            </Button>
+            <Button
+              onClick={submitDailyRefresh}
+              disabled={requestMutation.isPending || activeDaily}
+            >
+              {requestMutation.isPending || activeDaily ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <RefreshCw className="size-4" />
+              )}
+              {activeDaily ? "任务执行中" : "执行数据拉取"}
+            </Button>
+          </div>
         </CardContent>
       </Card>
 

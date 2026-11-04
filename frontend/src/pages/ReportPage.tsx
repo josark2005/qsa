@@ -262,7 +262,7 @@ export function ReportPage() {
               <Shield className="size-4" />
             </div>
             <div className="leading-tight">
-              <div className="text-sm font-semibold">QSA 选股报表</div>
+              <div className="text-sm font-semibold">QSA 报表</div>
             </div>
           </div>
           <div className="flex items-center gap-2">

@@ -83,6 +83,20 @@ def test_daily_report_syncs_and_notifies(app_fixture, monkeypatch, tmp_path) -> 
     monkeypatch.setattr(QQBotClient, "send_file", lambda self, target, info: calls.append(info))
 
     with container.session_factory() as db:
+        data_result = daily_report.run_daily_data_pipeline(
+            db,
+            container.session_factory,
+            target_date=date(2026, 10, 30),
+            settings=container.settings_service,
+            redis_client=container.redis,
+        )
+    assert data_result["data_ready"] is True
+    assert data_result["errors"] == {}
+    assert any("每日数据拉取开始" in text for text in calls)
+    # 数据拉取阶段不做筛选推送。
+    assert not any("每日汇报完成" in text for text in calls)
+
+    with container.session_factory() as db:
         result = daily_report.run_daily_report_pipeline(
             db,
             container.session_factory,
@@ -92,8 +106,7 @@ def test_daily_report_syncs_and_notifies(app_fixture, monkeypatch, tmp_path) -> 
         )
     assert result["report_token"] == "daily-token"
     assert result["notified"] is True
-    assert any("每日数据拉取开始" in text for text in calls)
-    assert any("每日选股完成" in text for text in calls)
+    assert any("每日汇报完成" in text for text in calls)
     assert "file-info" in calls
 
 
@@ -277,7 +290,7 @@ def _run_daily_report_for_missing_bars(
     )
 
     with container.session_factory() as db:
-        result = daily_report.run_daily_report_pipeline(
+        result = daily_report.run_daily_data_pipeline(
             db,
             container.session_factory,
             target_date=target,
@@ -287,7 +300,7 @@ def _run_daily_report_for_missing_bars(
     return result, calls
 
 
-def test_daily_report_fills_missing_bars_with_baostock_first(
+def test_daily_data_fills_missing_bars_with_baostock_first(
     app_fixture, monkeypatch
 ) -> None:
     """补全缺失日线时先走 BaoStock，仍缺的标的才用 Tencent 兜底。"""
@@ -296,14 +309,14 @@ def test_daily_report_fills_missing_bars_with_baostock_first(
         app_fixture, monkeypatch, baostock_ready=True
     )
 
-    assert result["report_token"] == "baostock-first-token"
+    assert result["data_ready"] is True
     assert [name for name, _ in calls] == ["baostock", "tencent"]
     assert calls[0][1] == ["000001.SZ", "600000.SH"]
     # 000001.SZ 已被 BaoStock 补上，Tencent 只处理仍然缺失的 600000.SH。
     assert calls[1][1] == ["600000.SH"]
 
 
-def test_daily_report_skips_baostock_when_day_not_updated(
+def test_daily_data_skips_baostock_when_day_not_updated(
     app_fixture, monkeypatch
 ) -> None:
     """BaoStock 尚无目标日数据时直接走 Tencent，避免全市场空查询。"""
@@ -312,7 +325,7 @@ def test_daily_report_skips_baostock_when_day_not_updated(
         app_fixture, monkeypatch, baostock_ready=False
     )
 
-    assert result["report_token"] == "baostock-first-token"
+    assert result["data_ready"] is True
     assert [name for name, _ in calls] == ["tencent"]
     assert calls[0][1] == ["000001.SZ", "600000.SH"]
 

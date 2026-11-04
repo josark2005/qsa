@@ -396,7 +396,7 @@ def test_daily_report_pushes_personal_groups(
         text for target, text in calls if target.platform == "onebot"
     ]
     assert personal_texts
-    assert "每日选股完成" in personal_texts[0]
+    assert "每日汇报完成" in personal_texts[0]
     assert "个人号通道" in personal_texts[0]
     assert "personal-token" in personal_texts[0]
     with container.session_factory() as db:

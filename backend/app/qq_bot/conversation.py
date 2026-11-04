@@ -23,6 +23,7 @@ from app.screening.registry import (
     normalize_params,
     normalize_value,
 )
+from app.services.personal_qq import set_personal_subscription
 from app.services.report_pdf import build_report_pdf
 from app.services.screen_reports import (
     create_report_snapshot,
@@ -353,7 +354,12 @@ def _session_text(session: dict[str, Any], *, max_conditions: int) -> str:
     return "\n".join(lines)
 
 
-def _help_text() -> str:
+def _help_text(platform: str = "official") -> str:
+    generate_hint = (
+        "确认数量后再发送「生成」获取报表链接（个人号通道暂不发送 PDF）。"
+        if platform == "onebot"
+        else "确认数量后再发送「生成」获取报表链接和 PDF。"
+    )
     return (
         "QSA 选股助手\n"
         "发送「筛选」开始，或直接发送条件，例如：\n"
@@ -364,7 +370,7 @@ def _help_text() -> str:
         "· 市盈率 < 30\n"
         "· 板块 = 创业板\n\n"
         "设置完成后发送「确认」统计数量；"
-        "确认数量后再发送「生成」获取报表链接和 PDF。\n\n"
+        f"{generate_hint}\n\n"
         "群内 @ 机器人并回复「订阅」，可订阅每日 03:31 选股推送；"
         "回复「退订」可取消。"
     )
@@ -492,6 +498,11 @@ SUBSCRIBE_HINT = (
     "已订阅 QSA 每日选股推送。每天 03:31 数据校验通过后，"
     "会向本群发送默认条件选股结果、报表链接和 PDF。回复「退订」可取消。"
 )
+ONE_BOT_SUBSCRIBE_HINT = (
+    "已订阅 QSA 每日选股推送。每天 03:31 数据校验通过后，"
+    "会向本群发送默认条件选股结果和报表链接"
+    "（个人号通道暂不发送 PDF 附件）。回复「退订」可取消。"
+)
 
 
 def _set_group_subscription(
@@ -522,9 +533,13 @@ def _set_group_subscription(
 
 
 def _session_key(target: ChatTarget) -> str:
+    platform = target.platform or "official"
     if target.kind == "group":
-        return f"group:{target.openid}:{target.actor_openid or target.msg_id}"
-    return f"c2c:{target.actor_openid or target.openid}"
+        return (
+            f"{platform}:group:{target.openid}:"
+            f"{target.actor_openid or target.msg_id}"
+        )
+    return f"{platform}:c2c:{target.actor_openid or target.openid}"
 
 
 def _load_session(
@@ -569,7 +584,7 @@ def _report_link(base_url: str, token: str) -> str:
 def _send_generation(
     *,
     db_factory: sessionmaker,
-    client: QQBotClient,
+    client: Any,
     target: ChatTarget,
     session: dict[str, Any],
     settings: SettingsService,
@@ -644,6 +659,7 @@ def handle_message(
     settings: SettingsService,
     redis_client: Any,
     config: AppConfig,
+    sender: Any | None = None,
 ) -> None:
     event_type = str(payload.get("t") or "")
     data = payload.get("d") or {}
@@ -676,6 +692,10 @@ def handle_message(
         )
     else:
         return
+    if sender is not None:
+        target.platform = str(
+            getattr(sender, "platform", "official") or "official"
+        )
     if not target.openid or not target.msg_id:
         logger.warning("QQ message missing openid/msg_id: %s", payload)
         return
@@ -690,23 +710,35 @@ def handle_message(
             pass
 
     snapshot = settings.snapshot
-    if not snapshot.get_bool("qq_bot.enabled"):
+    is_onebot = target.platform == "onebot"
+    if is_onebot:
+        # 个人号通道与官方机器人互相独立，只看 personal_qq.enabled。
+        if not snapshot.get_bool("personal_qq.enabled"):
+            return
+    elif not snapshot.get_bool("qq_bot.enabled"):
         return
     if snapshot.get_bool("maintenance.enabled"):
         return
 
-    app_id = (snapshot.get_str("qq_bot.app_id") or config.qq_bot_app_id).strip()
-    app_secret = (
-        snapshot.get_str("qq_bot.app_secret") or config.qq_bot_app_secret
-    ).strip()
-    client = QQBotClient(
-        app_id=app_id,
-        app_secret=app_secret,
-        redis_client=redis_client,
-        api_base=config.qq_bot_api_base,
-    )
-    if not client.configured:
-        logger.warning("QQ bot message received but credentials are not configured")
+    if sender is not None:
+        client = sender
+    else:
+        app_id = (
+            snapshot.get_str("qq_bot.app_id") or config.qq_bot_app_id
+        ).strip()
+        app_secret = (
+            snapshot.get_str("qq_bot.app_secret") or config.qq_bot_app_secret
+        ).strip()
+        client = QQBotClient(
+            app_id=app_id,
+            app_secret=app_secret,
+            redis_client=redis_client,
+            api_base=config.qq_bot_api_base,
+        )
+    if not getattr(client, "configured", True):
+        logger.warning(
+            "QQ bot message received but credentials are not configured"
+        )
         return
 
     text = str(data.get("content") or "").strip()
@@ -724,7 +756,7 @@ def handle_message(
         text[:80],
     )
     if not text:
-        client.send_text(target, _help_text())
+        client.send_text(target, _help_text(target.platform))
         return
     key = _session_key(target)
     lock_key = f"qsa:qq:lock:{key}"
@@ -752,21 +784,35 @@ def handle_message(
                     group_name = str(info.get("group_name") or "").strip() or None
                 except Exception:
                     logger.warning("failed to fetch QQ group name", exc_info=True)
-            _set_group_subscription(
-                session_factory,
-                target.openid,
-                active,
-                group_name,
-            )
-            client.send_text(
-                target,
-                SUBSCRIBE_HINT
-                if active
-                else "已取消本群每日选股推送。",
-            )
+            if is_onebot:
+                try:
+                    group_id = int(target.openid)
+                except (TypeError, ValueError):
+                    client.send_text(target, "群号格式不正确，无法订阅。")
+                    return
+                set_personal_subscription(
+                    session_factory,
+                    group_id,
+                    active,
+                    group_name,
+                )
+            else:
+                _set_group_subscription(
+                    session_factory,
+                    target.openid,
+                    active,
+                    group_name,
+                )
+            if active:
+                reply_text = (
+                    ONE_BOT_SUBSCRIBE_HINT if is_onebot else SUBSCRIBE_HINT
+                )
+            else:
+                reply_text = "已取消本群每日选股推送。"
+            client.send_text(target, reply_text)
             return
         if lowered in {"帮助", "help", "?", "？"}:
-            reply = _help_text()
+            reply = _help_text(target.platform)
         elif lowered in {"筛选", "开始", "选股", "开始筛选"}:
             session = {
                 "logic": "and",

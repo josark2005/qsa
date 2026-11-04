@@ -13,6 +13,7 @@ import {
 } from "lucide-react"
 import { toast } from "sonner"
 
+import { PersonalQQCard } from "@/components/PersonalQQCard"
 import { DefaultConditionsField } from "@/components/settings/DefaultConditionsField"
 import { SettingField } from "@/components/settings/SettingField"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -149,7 +150,7 @@ function QQBotStatusCard({
               ) : (
                 <WifiOff className="size-4 text-muted-foreground" />
               )}
-              机器人接入状态
+              机器人接入状态（官方）
             </CardTitle>
             <CardDescription>
               {status?.transport === "websocket"
@@ -517,6 +518,7 @@ export function SettingsPage() {
                       )}
                     </CardContent>
                   </Card>
+                  <PersonalQQCard />
                 </>
               ) : null}
               <Card>

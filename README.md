@@ -9,6 +9,7 @@ QSA 是一个前后端分离的条件筛选系统：FastAPI + PostgreSQL + Redis
 - 公开报表：只读 token 链接，包含 K 线、MACD、KDJ、RSI、EXPMA 等日/周/月图表。
 - PDF 报表：汇总表 + 最多 50 只标的详情页；超过 50 只只输出汇总。
 - QQ 机器人：私聊/群聊会话式选股、条件确认、报表链接与 PDF、群订阅和每日推送。
+- 个人号 QQ 机器人（可选，默认关闭）：通过 OneBot v11 协议端（SnowLuma / NapCat）接入个人号，支持白名单私聊、群 @ 订阅与每日推送（纯文本 + 报表链接）；非官方链路，存在账号风险。
 - 数据同步：腾讯、BaoStock、AkShare 多源行情，财报、股东户数、交易日历、涨跌停事件。
 - 历史数据：1990 年至今的月度 SQLite 归档，启动时自动导入 PostgreSQL。
 - 管理能力：用户管理、系统设置热更新、审计日志、手动回补、全量回补、每日定时任务。
@@ -38,6 +39,7 @@ frontend (nginx)
         backend (FastAPI) ──► PostgreSQL
             │                  Redis
             ├── QQ WebSocket（官方 qq-botpy SDK，出站）
+            ├── 个人号 OneBot WebSocket（可选，默认关闭）
             ├── PDF → data/reports
             └── 历史归档 → data/history
             ▲
@@ -53,7 +55,7 @@ backend/
   app/services/     报表、用户、PDF、历史归档等业务逻辑
   app/sync/         行情、财报、股东、涨跌停、pipeline
   app/screening/    因子注册表与 SQL 构建
-  app/qq_bot/       QQ 机器人（官方 qq-botpy SDK）与会话式选股
+  app/qq_bot/       QQ 机器人（官方 qq-botpy SDK）与会话式选股；onebot/ 为个人号通道
   migrations/       Alembic 迁移
   tests/            pytest
 frontend/
@@ -210,11 +212,19 @@ pnpm build
 | `QSA_REPORT_PDF_DIR` | PDF 目录，容器内为 `/app/data/reports` |
 | `QQ_BOT_APP_ID` / `QQ_BOT_APP_SECRET` | QQ 机器人凭据 |
 | `QQ_BOT_PUBLIC_BASE_URL` | 报表链接公网前缀 |
+| `PERSONAL_QQ_*` | 个人号 OneBot 地址/Token 的环境变量兜底（系统设置优先，默认关闭） |
 | `QSA_ADMIN_USERNAME` / `QSA_ADMIN_PASSWORD` | 空库时创建初始管理员 |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | 腾讯/AkShare 出站代理（requests），见「网络代理」 |
 | `BAOSTOCK_SOCKS_PROXY` | BaoStock 的 SOCKS5 代理，如 `socks5h://host.docker.internal:7893` |
 
 更多系统设置可在管理端「系统设置」中热更新。
+
+### 个人号 QQ（OneBot v11，可选）
+
+个人号通道与官方 QQ 机器人互相独立，默认关闭。在系统设置「个人号机器人」组填写 OneBot v11 协议端
+（SnowLuma、NapCat 等）的正向 WebSocket 地址、HTTP 地址和 Access Token，并填写机器人自身 QQ 号
+（`self_qq`）与私聊/群白名单；群内 @ 机器人并回复「订阅」后，每日选股完成会推送纯文本与报表链接
+（个人号通道不发送 PDF 附件）。该链路不是官方通道，存在账号被风控或封禁的风险，按需开启。
 
 ### 网络代理
 

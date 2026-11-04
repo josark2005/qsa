@@ -37,7 +37,9 @@ GROUP_ORDER = {
     "security": 20,
     "screening": 30,
     "sync": 40,
-    "maintenance": 50,
+    "qq_bot": 50,
+    "personal_qq": 60,
+    "maintenance": 70,
 }
 
 router = APIRouter(

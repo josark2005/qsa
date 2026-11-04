@@ -9,6 +9,10 @@ import type {
   SettingsResponse,
   FactorListResponse,
   InstrumentSearchResponse,
+  PersonalQQGroup,
+  PersonalQQGroupListResponse,
+  PersonalQQStatus,
+  PersonalQQTestResponse,
   QQBotStatus,
   QQSubscriptionListResponse,
   ReportHistoryResponse,
@@ -274,6 +278,40 @@ export const api = {
 
   qqSubscriptions(): Promise<QQSubscriptionListResponse> {
     return request<QQSubscriptionListResponse>("/admin/qq/subscriptions")
+  },
+
+  personalQQStatus(signal?: AbortSignal): Promise<PersonalQQStatus> {
+    return request<PersonalQQStatus>("/admin/personal-qq/status", { signal })
+  },
+
+  listPersonalQQGroups(signal?: AbortSignal): Promise<PersonalQQGroupListResponse> {
+    return request<PersonalQQGroupListResponse>("/admin/personal-qq/groups", {
+      signal,
+    })
+  },
+
+  addPersonalQQGroup(payload: {
+    group_id: number
+    group_name?: string | null
+  }): Promise<PersonalQQGroup> {
+    return request<PersonalQQGroup>("/admin/personal-qq/groups", {
+      method: "POST",
+      body: payload,
+    })
+  },
+
+  removePersonalQQGroup(groupId: number): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(
+      `/admin/personal-qq/groups/${groupId}`,
+      { method: "DELETE" },
+    )
+  },
+
+  testPersonalQQSend(groupId: number): Promise<PersonalQQTestResponse> {
+    return request<PersonalQQTestResponse>("/admin/personal-qq/test", {
+      method: "POST",
+      body: { group_id: groupId },
+    })
   },
 
   reportTechnical(token: string, symbol: string): Promise<TechnicalResponse> {

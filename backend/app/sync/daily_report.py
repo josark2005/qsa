@@ -14,9 +14,15 @@ from app.core.db import utcnow
 from app.core.settings_service import SettingsService
 from app.models.daily_bar import DailyBar
 from app.models.instrument import Instrument
+from app.models.personal_qq_group import PersonalQQGroup
 from app.models.qq_group_subscription import QQGroupSubscription
 from app.qq_bot.client import ChatTarget, QQBotClient
+from app.qq_bot.onebot.client import OneBotClient
 from app.schemas.screening import ConditionIn
+from app.services.personal_qq import (
+    build_onebot_client,
+    personal_targets as list_personal_targets,
+)
 from app.services.report_pdf import build_report_pdf
 from app.services.screen_reports import create_report_snapshot
 from app.sync.bars import (
@@ -108,6 +114,28 @@ def _notify(
             logger.exception("daily report QQ notification failed for %s", target.openid)
 
 
+def _notify_personal(
+    client: OneBotClient,
+    targets: list[ChatTarget],
+    text: str,
+) -> bool:
+    """向个人号 OneBot 群推送纯文本；任何失败都只记录日志，不影响官方流程。"""
+
+    if not client.configured or not targets:
+        return False
+    sent = False
+    for target in targets:
+        try:
+            client.send_text(target, text)
+            sent = True
+        except Exception:
+            logger.exception(
+                "daily report personal QQ notification failed for %s",
+                target.openid,
+            )
+    return sent
+
+
 def _coverage(
     db: Session,
     *,
@@ -197,8 +225,14 @@ def run_daily_report_pipeline(
         api_base=config.qq_bot_api_base,
     )
     targets = _subscribed_targets(db)
+    personal_enabled = snapshot.get_bool("personal_qq.enabled")
+    personal_client = build_onebot_client(snapshot, redis_client, config)
+    personal_groups = (
+        list_personal_targets(db) if personal_enabled else []
+    )
     results: dict[str, Any] = {}
     errors: dict[str, str] = {}
+    personal_notified = False
 
     _notify(
         client,
@@ -350,11 +384,18 @@ def run_daily_report_pipeline(
             targets,
             f"QSA 每日选股未推送：数据校验未通过。\n{readiness}",
         )
+        personal_notified = _notify_personal(
+            personal_client,
+            personal_groups,
+            f"QSA 每日选股未推送：数据校验未通过。\n{readiness}",
+        )
         return {
             "target_date": target_date.isoformat(),
             "data_ready": False,
             "readiness": readiness,
             "subscribed_groups": len(targets),
+            "personal_groups": len(personal_groups),
+            "personal_notified": personal_notified,
             "report_token": None,
             "notified": not not targets and client.configured,
             "errors": errors,
@@ -395,6 +436,13 @@ def run_daily_report_pipeline(
             f"QSA 每日选股完成\n交易日：{target_date.isoformat()}\n"
             f"入选：{report.total} 只\n报表：{link}\n{detail}",
         )
+        personal_notified = _notify_personal(
+            personal_client,
+            personal_groups,
+            f"QSA 每日选股完成\n交易日：{target_date.isoformat()}\n"
+            f"入选：{report.total} 只\n报表：{link}\n"
+            "（个人号通道，PDF 请打开链接查看）",
+        )
         try:
             pdf_path = build_report_pdf(
                 db, report, public_base_url=base_url
@@ -425,16 +473,34 @@ def run_daily_report_pipeline(
             )
         ).all():
             subscription.last_pushed_at = utcnow()
+        if personal_notified:
+            for group in db.scalars(
+                select(PersonalQQGroup).where(
+                    PersonalQQGroup.active.is_(True)
+                )
+            ).all():
+                group.last_pushed_at = utcnow()
         db.commit()
     except Exception as exc:
         logger.exception("daily report generation failed")
         errors["report"] = f"{type(exc).__name__}: {exc}"
         _notify(client, targets, f"QSA 每日选股失败：{exc}")
+        personal_notified = _notify_personal(
+            personal_client,
+            personal_groups,
+            f"QSA 每日选股失败：{exc}",
+        )
 
     if errors:
         _notify(
             client,
             targets,
+            f"每日拉取完成，但有 {len(errors)} 个步骤异常："
+            + "、".join(errors.keys()),
+        )
+        _notify_personal(
+            personal_client,
+            personal_groups,
             f"每日拉取完成，但有 {len(errors)} 个步骤异常："
             + "、".join(errors.keys()),
         )
@@ -450,6 +516,8 @@ def run_daily_report_pipeline(
         },
         "report_token": report.token if report is not None else None,
         "subscribed_groups": len(targets),
+        "personal_groups": len(personal_groups),
+        "personal_notified": personal_notified,
         "notified": bool(targets) and client.configured,
         "errors": errors,
     }

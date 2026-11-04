@@ -16,6 +16,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.api.routes import (
     admin_audit,
     admin_logs,
+    admin_personal_qq,
     admin_settings,
     admin_sync,
     admin_users,
@@ -33,6 +34,7 @@ from app.core.redis_client import make_redis
 from app.core.settings_service import SettingsService
 from app.core.settings_watcher import SettingsWatcher
 from app.datasources.baostock import log_baostock_transport
+from app.qq_bot.onebot.service import PersonalQQService
 from app.qq_bot.websocket_client import QQBotWebSocket
 from app.services.history_archive import auto_import_history
 from app.services.login_limiter import LoginLimiter
@@ -100,6 +102,14 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         )
         app.state.qq_socket = qq_socket
         qq_task = asyncio.create_task(qq_socket.run())
+        personal_qq_service = PersonalQQService(
+            session_factory=session_factory,
+            settings=settings_service,
+            redis_client=redis_client,
+            config=config,
+        )
+        app.state.personal_qq_service = personal_qq_service
+        personal_qq_task = asyncio.create_task(personal_qq_service.run())
         if config.history_auto_import and config.app_env != "test":
             threading.Thread(
                 target=auto_import_history,
@@ -115,6 +125,10 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             qq_task.cancel()
             with contextlib.suppress(BaseException):
                 await qq_task
+            await personal_qq_service.close()
+            personal_qq_task.cancel()
+            with contextlib.suppress(BaseException):
+                await personal_qq_task
             watcher.stop()
             try:
                 redis_client.close()
@@ -144,6 +158,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.include_router(admin_audit.router, prefix=config.api_prefix)
     app.include_router(admin_logs.router, prefix=config.api_prefix)
     app.include_router(admin_sync.router, prefix=config.api_prefix)
+    app.include_router(admin_personal_qq.router, prefix=config.api_prefix)
     app.include_router(screen.router, prefix=config.api_prefix)
     app.include_router(instruments.router, prefix=config.api_prefix)
     app.include_router(reports.router, prefix=config.api_prefix)

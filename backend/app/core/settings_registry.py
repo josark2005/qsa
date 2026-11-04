@@ -24,6 +24,7 @@ GROUP_LABELS = {
     "screening": "查询与筛选",
     "sync": "数据同步",
     "qq_bot": "QQ 机器人",
+    "personal_qq": "个人号机器人",
     "maintenance": "维护",
 }
 
@@ -558,6 +559,83 @@ SETTING_SPECS: tuple[SettingSpec, ...] = (
         maximum=30,
         description="单个 QQ 会话允许设置的筛选条件数量。",
         order=50,
+    ),
+    SettingSpec(
+        key="personal_qq.enabled",
+        label="启用个人号机器人",
+        group="personal_qq",
+        type="bool",
+        default=False,
+        description=(
+            "启用后通过第三方 OneBot v11 协议端（SnowLuma、NapCat 等）收发"
+            "个人 QQ 消息。该链路非官方通道，存在账号被风控或封禁的风险，"
+            "默认关闭；与官方 QQ 机器人（qq_bot.*）互相独立。"
+        ),
+        order=1,
+    ),
+    SettingSpec(
+        key="personal_qq.ws_url",
+        label="OneBot WebSocket 地址",
+        group="personal_qq",
+        type="str",
+        default="",
+        description=(
+            "OneBot v11 正向 WebSocket 地址，例如 ws://host.docker.internal:3001；"
+            "留空表示不启动个人号通道。容器内不要写 127.0.0.1（那是容器自身）。"
+        ),
+        order=2,
+    ),
+    SettingSpec(
+        key="personal_qq.http_url",
+        label="OneBot HTTP 地址",
+        group="personal_qq",
+        type="str",
+        default="",
+        description=(
+            "OneBot v11 HTTP 接口地址，例如 http://host.docker.internal:3000；"
+            "用于发送消息、获取群信息和每日推送。"
+        ),
+        order=3,
+    ),
+    SettingSpec(
+        key="personal_qq.access_token",
+        label="OneBot Access Token",
+        group="personal_qq",
+        type="str",
+        default="",
+        sensitive=True,
+        description="OneBot HTTP/WebSocket 鉴权 Token；协议端未开启鉴权时留空。",
+        order=4,
+    ),
+    SettingSpec(
+        key="personal_qq.self_qq",
+        label="机器人个人 QQ 号",
+        group="personal_qq",
+        type="str",
+        default="",
+        description="个人号机器人自身的 QQ 号，用于过滤自己发送的消息并识别群内 @。",
+        order=5,
+    ),
+    SettingSpec(
+        key="personal_qq.allow_private",
+        label="允许私聊的 QQ 号",
+        group="personal_qq",
+        type="str",
+        default="",
+        description="允许私聊的 QQ 号，英文逗号分隔；留空表示忽略所有私聊消息。",
+        order=6,
+    ),
+    SettingSpec(
+        key="personal_qq.allow_groups",
+        label="允许的 QQ 群号",
+        group="personal_qq",
+        type="str",
+        default="",
+        description=(
+            "允许接收消息的 QQ 群号，英文逗号分隔；留空表示忽略所有群消息。"
+            "群内需要 @ 机器人并回复「订阅」后才会主动推送。"
+        ),
+        order=7,
     ),
     SettingSpec(
         key="maintenance.enabled",

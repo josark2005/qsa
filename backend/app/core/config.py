@@ -35,6 +35,12 @@ class AppConfig(BaseSettings):
     qq_bot_api_base: str = "https://api.bot.qq.com"
     qq_bot_public_base_url: str = "http://127.0.0.1:5173"
 
+    # 个人号（OneBot v11）通道的环境变量兜底，系统设置优先。
+    personal_qq_ws_url: str = ""
+    personal_qq_http_url: str = ""
+    personal_qq_access_token: str = ""
+    personal_qq_self_qq: str = ""
+
     history_dir: str = ""
     history_auto_import: bool = True
 

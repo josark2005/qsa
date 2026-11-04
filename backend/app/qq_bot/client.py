@@ -18,6 +18,8 @@ class ChatTarget:
     msg_id: str
     event_id: str | None = None
     actor_openid: str | None = None
+    # 消息通道：official = 官方 qq-botpy 机器人，onebot = 个人号 OneBot v11。
+    platform: str = "official"
     seq: int = 0
 
     def next_seq(self) -> int:

@@ -375,6 +375,38 @@ export interface QQBotStatus {
   webhook_path: string
 }
 
+export interface PersonalQQStatus {
+  enabled: boolean
+  configured: boolean
+  connected: boolean
+  last_event: string | null
+  last_event_at: string | null
+  last_error: string | null
+  groups: number
+  http_url: string
+  ws_url: string
+  self_qq: string
+}
+
+export interface PersonalQQGroup {
+  id: number
+  group_id: string
+  group_name: string | null
+  active: boolean
+  subscribed_at: string | null
+  last_pushed_at: string | null
+}
+
+export interface PersonalQQGroupListResponse {
+  items: PersonalQQGroup[]
+}
+
+export interface PersonalQQTestResponse {
+  ok: boolean
+  error: string | null
+  retcode: number | null
+}
+
 export interface SyncRequestCreate {
   kind: "pipeline" | "backfill" | "full_backfill" | "history_import"
   pipeline?: string | null

@@ -5,6 +5,7 @@ from app.models.financial_report import FinancialReport
 from app.models.history_import import HistoryImport
 from app.models.instrument import Instrument
 from app.models.limit_event import LimitEvent
+from app.models.personal_qq_group import PersonalQQGroup
 from app.models.qq_group_subscription import QQGroupSubscription
 from app.models.screen_report import ScreenReport
 from app.models.shareholder_count import ShareholderCount
@@ -23,6 +24,7 @@ __all__ = [
     "HistoryImport",
     "Instrument",
     "LimitEvent",
+    "PersonalQQGroup",
     "QQGroupSubscription",
     "ScreenReport",
     "ShareholderCount",

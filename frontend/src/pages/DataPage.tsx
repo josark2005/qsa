@@ -657,7 +657,7 @@ export function DataPage() {
           <CardTitle className="text-base">日常回补</CardTitle>
           <CardDescription>
             只补齐上一交易日缺失的日线数据（含北交所），完成后使用默认筛选条件选股，
-            并向已订阅的 QQ 群推送报表链接和 PDF。每日 03:31 自动执行。
+            并向已订阅的 QQ 群推送报表链接和 PDF。每日 16:00 收盘后自动执行。
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -1402,7 +1402,7 @@ uv run python -m app.worker`}
         </CardHeader>
         <CardContent className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <p className="text-xs leading-5 text-destructive">
-            危险操作：会重新拉取全部历史数据，不替代日常 03:31 增量任务。
+            危险操作：会重新拉取全部历史数据，不替代日常 16:00 增量任务。
           </p>
           <Button
             variant="destructive"

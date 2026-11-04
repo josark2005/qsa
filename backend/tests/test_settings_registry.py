@@ -18,6 +18,11 @@ def test_defaults_are_valid() -> None:
     validate_settings_map(values)
 
 
+def test_daily_report_runs_at_16() -> None:
+    values = default_values()
+    assert values["sync.pipeline.daily_report.cron"] == "0 16 * * *"
+
+
 def test_cron_rejects_too_frequent_schedule() -> None:
     spec = SETTINGS_BY_KEY["sync.pipeline.market.cron"]
     with pytest.raises(SettingsValidationError):

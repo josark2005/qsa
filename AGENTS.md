@@ -12,7 +12,7 @@ QSA 是一个前后端分离的条件筛选系统：FastAPI + PostgreSQL + Redis
 - `backend/app/sync/`：行情/财报/股东同步、涨跌停重算、pipeline、全量回补。
 - `backend/app/screening/`：因子注册表 `registry.py`、SQL 构建 `query_builder.py`。
 - `backend/app/qq_bot/`：QQ 机器人（官方 qq-botpy SDK）、会话式选股、群订阅；`onebot/` 为独立的个人号 OneBot v11 通道。
-- `backend/migrations/versions/`：Alembic 迁移；以 `alembic heads` 为准，当前为 `c3f8a1d6b2e4`。
+- `backend/migrations/versions/`：Alembic 迁移；以 `alembic heads` 为准，当前为 `d4b7c2e9f1a3`。
 - `frontend/src/pages/`：页面；`components/`：布局与业务组件；`lib/api.ts`、`lib/types.ts`：API 契约。
 - `data/history/`：1990 至今的月度 SQLite 归档；`data/reports/`：PDF 缓存；`data/bootstrap/`：部署用数据库 dump。
 - `docker-compose.yml`：本地/服务器部署栈，直接拉取 GHCR 镜像；`docker-compose.dev.yml`：完整开发栈。
@@ -110,7 +110,7 @@ Linux/容器中使用 `.venv/bin/python`。Docker 相关命令在 Git Bash 下�
 - worker 日志：`worker_logs` 表（`models/worker_log.py`）由 `services/worker_logs.py` 的 `WorkerLogHandler` 异步落库（有界队列 + 1s/100 条批量写，启动只保留 20000 行 / 7 天，超长消息截断 4000 字符）；只捕获 `app.*` 的 INFO+ 和其它 logger 的 WARNING+，并通过 ContextVar `CURRENT_SYNC_REQUEST` 给手动同步请求打上 `request_id`。handler 只在 `worker.main()` 安装（pytest 不启动线程）。
 - 日志查询 API：`GET /api/admin/logs`（admin）支持 `level` / `request_id` / `q` / `after_id`（增量轮询）/ `before_id`（向前翻页）/ `limit≤500`，返回按 id 升序的 `{items, has_more}`；参数非法或 after/before 同传返回 422。前端在 `/admin/data`：活动请求卡片内「数据更新日志」每 2s 增量 tail，底部「Worker 日志」卡片提供级别/关键词/请求 ID 筛选、自动刷新与「加载更早」。
 - 数据修复：`python -m app.cli repair-adj-factors [--symbol 600299.SH ...] [--asset-type stock|etf|all] [--limit N] [--apply]`（默认 dry-run）扫描 `daily_bars.adj_factor`，把回退/缺失的因子按前向最大值补齐并重算 `close_adj`；K 线与指标是实时计算，修复后刷新网页即可，旧 PDF 缓存里的指标表不会自动变化。
-- 个人号 QQ 机器人（OneBot v11）：与官方 qq-botpy 通道完全独立、默认关闭（`personal_qq.enabled=false`），通过第三方协议端（SnowLuma / NapCat 等）的 OneBot v11 正向 WebSocket 接收事件、HTTP 接口发送消息。该链路不是官方通道，存在账号被风控或封禁的风险，只在明确需要时开启。配置项在系统设置「个人号机器人」组：`personal_qq.ws_url`（如 `ws://host.docker.internal:3001`）、`personal_qq.http_url`（如 `http://host.docker.internal:3000`）、`personal_qq.access_token`（协议端未鉴权时留空）、`personal_qq.self_qq`（机器人自身 QQ 号，用于过滤自己消息和识别群 @）、`personal_qq.allow_private` / `personal_qq.allow_groups`（英文逗号分隔的白名单，留空表示忽略对应类型消息）。群内需 @ 机器人并回复「订阅」才会写入 `personal_qq_groups` 并在每日 03:31 选股完成后收到纯文本推送（含报表链接，个人号通道不发送 PDF 附件）；服务只允许单实例 leader（Redis 锁），协议端地址或 Token 变更会自动重连。管理接口为 `/api/admin/personal-qq/{status,groups,test}`。
+- 个人号 QQ 机器人（OneBot v11）：与官方 qq-botpy 通道完全独立、默认关闭（`personal_qq.enabled=false`），通过第三方协议端（SnowLuma / NapCat 等）的 OneBot v11 正向 WebSocket 接收事件、HTTP 接口发送消息。该链路不是官方通道，存在账号被风控或封禁的风险，只在明确需要时开启。配置项在系统设置「个人号机器人」组：`personal_qq.ws_url`（如 `ws://host.docker.internal:3001`）、`personal_qq.http_url`（如 `http://host.docker.internal:3000`）、`personal_qq.access_token`（协议端未鉴权时留空）、`personal_qq.self_qq`（机器人自身 QQ 号，用于过滤自己消息和识别群 @）、`personal_qq.allow_private` / `personal_qq.allow_groups`（英文逗号分隔的白名单，留空表示忽略对应类型消息）。群内需 @ 机器人并回复「订阅」才会写入 `personal_qq_groups` 并在每日 16:00 选股完成后收到纯文本推送（含报表链接，个人号通道不发送 PDF 附件）；服务只允许单实例 leader（Redis 锁），协议端地址或 Token 变更会自动重连。管理接口为 `/api/admin/personal-qq/{status,groups,test}`。
 - API 与 worker 都设计为单副本：QQ 机器人 WebSocket、APScheduler 和队列消费者不能随意横向扩容。
 
 ## 前端约定

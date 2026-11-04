@@ -351,3 +351,52 @@ def test_service_dispatches_and_dedupes(app_fixture, monkeypatch) -> None:
     assert sender is client
     assert container.redis.get("qsa:personal_qq:last_event") is not None
     assert container.redis.get("qsa:personal_qq:last_event_at") is not None
+
+
+def test_service_relaxes_mention_in_chat_mode(app_fixture, monkeypatch) -> None:
+    from app.services.qq_chat_mode import set_chat_mode
+
+    container = app_fixture.client.app.state.container
+    captured: list[dict] = []
+    monkeypatch.setattr(
+        service_module,
+        "handle_message",
+        lambda payload, **kwargs: captured.append(payload),
+    )
+    service = PersonalQQService(
+        session_factory=container.session_factory,
+        settings=container.settings_service,
+        redis_client=container.redis,
+        config=container.config,
+    )
+    client = _client(container.redis)
+    event = json.dumps(
+        {
+            "post_type": "message",
+            "message_type": "group",
+            "message_id": 88,
+            "user_id": 10002,
+            "group_id": 555,
+            "message": [
+                {"type": "text", "data": {"text": "今天天气不错"}}
+            ],
+        }
+    )
+
+    async def scenario() -> None:
+        # 未开启聊天模式：没有 @ 的群消息直接丢弃。
+        await service._handle_event(event, client, "999", set(), {"555"})
+        set_chat_mode(container.redis, "555", ttl_seconds=600)
+        await service._handle_event(
+            event.replace("\"message_id\": 88", "\"message_id\": 89"),
+            client,
+            "999",
+            set(),
+            {"555"},
+        )
+
+    asyncio.run(scenario())
+    assert len(captured) == 1
+    assert captured[0]["t"] == "GROUP_MESSAGE_CREATE"
+    assert captured[0]["d"]["content"] == "今天天气不错"
+

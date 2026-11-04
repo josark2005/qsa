@@ -496,3 +496,46 @@ def test_disabled_or_unconfigured_raises_llm_error(
         _call(http, redis_client, snapshot=_snapshot(**{"llm.model": ""}))
 
     assert http.calls == []
+
+
+# -- 群聊静默 -------------------------------------------------------------
+def test_chat_reply_silent_token_skips_history(
+    redis_client, tool_calls
+) -> None:
+    http = FakeHTTP([_final("  #SILENT#  ")])
+    reply = chat_reply(
+        snapshot=_snapshot(**{"llm.max_tool_rounds": 0}),
+        session_factory=None,
+        redis_client=redis_client,
+        session_key=SESSION_KEY,
+        text="今天天气不错",
+        speaker="群友10002",
+        silent_allowed=True,
+        http=http,
+    )
+    assert reply == ""
+    # 静默时既不发送内容，也不写入上下文。
+    assert redis_client.get(HISTORY_KEY) is None
+    body = http.bodies[0]
+    assert any(
+        item.get("content") == llm_chat.SILENT_INSTRUCTION
+        for item in body["messages"]
+        if item.get("role") == "system"
+    )
+
+
+def test_chat_reply_silent_disabled_always_answers(redis_client, tool_calls) -> None:
+    http = FakeHTTP([_final("#SILENT#")])
+    reply = chat_reply(
+        snapshot=_snapshot(**{"llm.max_tool_rounds": 0}),
+        session_factory=None,
+        redis_client=redis_client,
+        session_key=SESSION_KEY,
+        text="你好",
+        speaker="群友10002",
+        silent_allowed=False,
+        http=http,
+    )
+    assert reply == "#SILENT#"
+    assert redis_client.get(HISTORY_KEY) is not None
+

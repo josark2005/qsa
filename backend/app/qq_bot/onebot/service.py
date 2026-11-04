@@ -16,6 +16,7 @@ from app.core.settings_service import SettingsService
 from app.qq_bot.conversation import handle_message
 from app.qq_bot.onebot.adapter import to_payload
 from app.services.personal_qq import build_onebot_client
+from app.services.qq_chat_mode import get_chat_mode
 
 logger = logging.getLogger(__name__)
 
@@ -274,6 +275,16 @@ class PersonalQQService:
                     await ws.close()
                 return
 
+    def _chat_mode_on(self, event: dict[str, Any]) -> bool:
+        """群聊开启聊天模式后不再要求 @ 机器人，普通消息也交给会话层判断。"""
+
+        if str(event.get("message_type") or "") != "group":
+            return False
+        group_id = str(event.get("group_id") or "").strip()
+        if not group_id:
+            return False
+        return get_chat_mode(self.redis, group_id) is not None
+
     async def _handle_event(
         self,
         raw: Any,
@@ -317,6 +328,7 @@ class PersonalQQService:
             self_qq=self_qq,
             allow_private=allow_private,
             allow_groups=allow_groups,
+            require_mention=not self._chat_mode_on(event),
         )
         if payload is None:
             return

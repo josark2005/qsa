@@ -7,6 +7,7 @@ import fakeredis
 from app.core.settings_service import SettingsSnapshot
 from app.qq_bot import conversation
 from app.qq_bot.conversation import handle_message
+from app.qq_bot.onebot.adapter import to_payload
 from app.qq_bot.onebot.client import OneBotClient
 from app.services import qq_chat_mode
 from app.services.qq_chat_mode import (
@@ -158,7 +159,6 @@ def test_group_chat_mode_toggles_and_routes_to_llm(app_fixture, monkeypatch) -> 
     assert chat_mode_enabled(container.redis, "555") is True
 
     _send_group(app_fixture, "你好", "m2", client)
-    assert messages[-2] == "正在思考…"
     assert messages[-1] == "模型回复"
     assert calls[-1]["session_key"] == "group:555"
     assert calls[-1]["text"] == "你好"
@@ -319,3 +319,134 @@ def test_chat_mode_state_is_json_payload(app_fixture) -> None:
     payload = json.loads(raw)
     assert payload["mode"] == MODE_MENTION
     assert payload["enabled_by"] == "10001"
+
+
+def _send_group_plain(app_fixture, content: str, message_id: str, client) -> None:
+    """群里没有 @ 机器人的普通消息（OneBot -> GROUP_MESSAGE_CREATE）。"""
+
+    container = app_fixture.client.app.state.container
+    handle_message(
+        {
+            "t": "GROUP_MESSAGE_CREATE",
+            "id": message_id,
+            "d": {
+                "id": message_id,
+                "content": content,
+                "group_openid": "555",
+                "author": {"member_openid": "10002"},
+            },
+        },
+        session_factory=container.session_factory,
+        settings=container.settings_service,
+        redis_client=container.redis,
+        config=container.config,
+        sender=client,
+    )
+
+
+def test_group_chat_mode_relaxes_mention_and_allows_silence(
+    app_fixture, monkeypatch
+) -> None:
+    container = app_fixture.client.app.state.container
+    _enable_llm(container)
+    messages: list[str] = []
+    monkeypatch.setattr(
+        OneBotClient, "send_text", lambda self, target, text: messages.append(text)
+    )
+    monkeypatch.setattr(OneBotClient, "group_info", lambda self, gid: {})
+    calls: list[dict] = []
+
+
+    def fake_reply(**kwargs):
+        calls.append(kwargs)
+        # 模型判断这条群消息不需要回应。
+        return ""
+
+    monkeypatch.setattr(conversation, "chat_reply", fake_reply)
+    client = OneBotClient(
+        http_url="http://127.0.0.1:3000", redis_client=container.redis
+    )
+
+
+    # 未开启聊天模式：普通群消息不应触发任何回复。
+    _send_group_plain(app_fixture, "随便聊聊", "x1", client)
+    assert messages == []
+    assert calls == []
+
+
+    _send_group(app_fixture, "开启聊天模式", "x2", client)
+    assert chat_mode_enabled(container.redis, "555") is True
+    before = len(messages)
+
+
+    # 开启后不需要 @：普通消息交给模型判断。
+    _send_group_plain(app_fixture, "今天天气不错", "x3", client)
+    assert calls[-1]["silent_allowed"] is True
+    assert len(messages) == before  # 模型选择静默 -> 一条消息都不发
+
+
+    monkeypatch.setattr(
+        conversation, "chat_reply", lambda **kwargs: "这条我来回答"
+    )
+    _send_group_plain(app_fixture, "帮我看看市盈率 20 以下的", "x4", client)
+    assert messages[-1] == "这条我来回答"
+
+
+    # @ 机器人的消息不允许静默，必须回复。
+    addressed_calls: list[dict] = []
+    monkeypatch.setattr(
+        conversation,
+        "chat_reply",
+        lambda **kwargs: addressed_calls.append(kwargs) or "@ 回复",
+    )
+    _send_group(app_fixture, "你好", "x5", client)
+    assert addressed_calls[-1]["silent_allowed"] is False
+    assert messages[-1] == "@ 回复"
+
+
+def test_adapter_require_mention_toggle() -> None:
+    event = {
+        "post_type": "message",
+        "message_type": "group",
+        "message_id": 31,
+        "user_id": 10002,
+        "group_id": 555,
+        "message": [
+            {"type": "text", "data": {"text": "今天天气不错"}},
+        ],
+    }
+    assert (
+        to_payload(
+            event, self_qq="999", allow_private=set(), allow_groups={"555"}
+        )
+        is None
+    )
+    payload = to_payload(
+        event,
+        self_qq="999",
+        allow_private=set(),
+        allow_groups={"555"},
+        require_mention=False,
+    )
+    assert payload is not None
+    assert payload["t"] == "GROUP_MESSAGE_CREATE"
+    assert payload["d"]["content"] == "今天天气不错"
+
+
+    mentioned = dict(
+        event,
+        message=[
+            {"type": "at", "data": {"qq": "999"}},
+            {"type": "text", "data": {"text": " 你好"}},
+        ],
+    )
+    payload = to_payload(
+        mentioned,
+        self_qq="999",
+        allow_private=set(),
+        allow_groups={"555"},
+        require_mention=False,
+    )
+    assert payload is not None
+    assert payload["t"] == "GROUP_AT_MESSAGE_CREATE"
+

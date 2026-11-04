@@ -374,7 +374,7 @@ export function PersonalQQCard() {
               ) : null}
             </div>
             <div className="text-xs text-muted-foreground">
-              群内 @ 机器人发送「开启聊天模式」/「关闭聊天模式」切换，私聊可直接提问，超过有效期自动关闭。
+              群内 @ 机器人发送「开启聊天模式」后，本群消息会交给模型判断是否需要回应，不必每条都 @；发送「关闭聊天模式」退出，超过有效期自动关闭。私聊可直接提问。
             </div>
           </div>
 

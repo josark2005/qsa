@@ -73,12 +73,15 @@ def to_payload(
     self_qq: str,
     allow_private: set[str],
     allow_groups: set[str],
+    require_mention: bool = True,
 ) -> dict[str, Any] | None:
     """把 OneBot v11 事件转换为官方机器人事件格式（handle_message 入参）。
 
-    只处理 post_type == 'message' 的消息事件；私聊和群聊都必须在允许列表内，
-    群聊还要求消息中 @ 了机器人本身。其它事件（心跳、通知、自己发的消息）
-    返回 None。
+    只处理 post_type == 'message' 的消息事件；私聊和群聊都必须在允许列表内。
+    群聊默认要求消息中 @ 了机器人本身；开启聊天模式的群会传
+    require_mention=False，此时未 @ 的消息也会转发，并标记为
+    GROUP_MESSAGE_CREATE，由会话层决定是否需要回复。
+    其它事件（心跳、通知、自己发的消息）返回 None。
     """
 
     if not isinstance(event, dict):
@@ -99,13 +102,18 @@ def to_payload(
     if message_type == "group" or (not message_type and group_id):
         if not group_id or group_id not in allow_groups:
             return None
-        if not _mentioned_self(message, self_qq):
+        mentioned = _mentioned_self(message, self_qq)
+        if not mentioned and require_mention:
             return None
         text = _group_text(message)
         if not text:
             return None
         return {
-            "t": "GROUP_AT_MESSAGE_CREATE",
+            "t": (
+                "GROUP_AT_MESSAGE_CREATE"
+                if mentioned
+                else "GROUP_MESSAGE_CREATE"
+            ),
             "id": message_id,
             "d": {
                 "id": message_id,

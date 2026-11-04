@@ -16,6 +16,14 @@ LAST_ERROR_KEY = "qsa:llm:last_error"
 HISTORY_PREFIX = "qsa:qq:llm:history:"
 
 EMPTY_REPLY = "抱歉，这次没有生成回复。"
+# 群聊里模型判断“这条消息不需要回应”时输出的标记，会话层据此不发送任何消息。
+SILENT_TOKEN = "#SILENT#"
+SILENT_INSTRUCTION = (
+    "当前是群聊，你不需要回应每一条消息。只有当消息在和你对话、向你提问，"
+    "或者你确实能提供帮助时才回复；如果是群友之间的闲聊、@ 其他人、"
+    "与条件筛选或数据无关且不需要你的内容，只输出 "
+    f"{SILENT_TOKEN}，不要输出任何其它文字。"
+)
 DEFAULT_TTL_SECONDS = 3600
 MIN_TTL_SECONDS = 60
 ERROR_TTL_SECONDS = 3600
@@ -305,6 +313,15 @@ def _load_history(redis_client: Any, session_key: str) -> list[dict[str, str]]:
     return history
 
 
+def _is_silent(reply: str) -> bool:
+    """判断模型是否表示“不需要回应”。"""
+
+    text = (reply or "").strip().strip("*_ \t\n\"'")
+    if not text:
+        return True
+    return text.upper() == SILENT_TOKEN
+
+
 def _save_history(
     redis_client: Any,
     session_key: str,
@@ -528,9 +545,14 @@ def chat_reply(
     session_key: str,
     text: str,
     speaker: str = "",
+    silent_allowed: bool = False,
     http: Any | None = None,
 ) -> str:
-    """组装上下文、执行工具循环并返回纯文本回复；失败抛 LLMError。"""
+    """组装上下文、执行工具循环并返回纯文本回复；失败抛 LLMError。
+
+    silent_allowed=True 用于群里没有 @ 机器人的普通消息：模型可以用
+    SILENT_TOKEN 表示“不需要回应”，此时返回空字符串。
+    """
 
     settings = llm_settings(snapshot)
     if not settings.enabled:
@@ -547,6 +569,8 @@ def chat_reply(
     messages: list[dict[str, Any]] = []
     if settings.system_prompt:
         messages.append({"role": "system", "content": settings.system_prompt})
+    if silent_allowed:
+        messages.append({"role": "system", "content": SILENT_INSTRUCTION})
     messages.extend(history)
     messages.append({"role": "user", "content": user_content})
 
@@ -582,7 +606,12 @@ def chat_reply(
         raise LLMError(f"模型调用失败：{reason}") from exc
 
     _clear_error(redis_client)
-    reply = str(answer or "").strip() or EMPTY_REPLY
+    reply = str(answer or "").strip()
+    if silent_allowed and _is_silent(reply):
+        # 群聊里模型主动选择不回应：不发送消息，也不写入上下文。
+        logger.info("LLM 判断无需回应，已跳过该条群消息")
+        return ""
+    reply = reply or EMPTY_REPLY
     _save_history(
         redis_client,
         session_key,

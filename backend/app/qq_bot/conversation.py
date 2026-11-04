@@ -382,9 +382,9 @@ def _help_text(
     chat_hint = ""
     if chat_available:
         chat_hint = (
-            "\n\n群内 @ 机器人发送「开启聊天模式」，之后 @ 机器人 直接提问"
-            "即可和模型对话；发送「关闭聊天模式」退出。"
-            "私聊可以直接提问。"
+            "\n\n群内 @ 机器人发送「开启聊天模式」后，本群消息会交给模型"
+            "判断是否需要回应（不必每条都 @），@ 机器人仍可继续使用"
+            "「筛选」等指令；发送「关闭聊天模式」退出。私聊可以直接提问。"
         )
     return (
         "QSA 选股助手\n"
@@ -519,8 +519,9 @@ def _quota_allowed(
 
 
 CHAT_MODE_ON_HINT = (
-    "已开启聊天模式。之后 @ 机器人 直接提问即可和模型对话，"
-    "也可以继续发送「筛选」使用条件筛选。发送「关闭聊天模式」退出。"
+    "已开启聊天模式。本群消息会交给模型判断是否需要回应，不必每条都 @；"
+    "需要选股时仍可 @ 机器人发送「筛选」等指令。"
+    "发送「关闭聊天模式」退出。"
 )
 CHAT_MODE_OFF_HINT = (
     "已关闭聊天模式。@ 机器人 发送「筛选」仍可继续使用条件筛选功能。"
@@ -772,8 +773,13 @@ def _answer_with_llm(
     session_factory: sessionmaker,
     settings: SettingsService,
     redis_client: Any,
+    addressed: bool = True,
 ) -> str:
-    """把一条消息交给模型处理；失败时返回可直接展示的错误文案。"""
+    """把一条消息交给模型处理；失败时返回可直接展示的错误文案。
+
+    addressed=False 表示群里没有 @ 机器人的普通消息：允许模型判断无需
+    回应，此时返回空字符串，调用方不要发送任何内容。
+    """
 
     snapshot = settings.snapshot
     chat_settings = llm_settings(snapshot)
@@ -791,6 +797,7 @@ def _answer_with_llm(
             session_key=_chat_session_key(target),
             text=text,
             speaker=speaker,
+            silent_allowed=not addressed,
         )
     except LLMError as exc:
         logger.warning("LLM chat failed: %s", exc)
@@ -816,8 +823,12 @@ def _try_chat_answer(
     session_factory: sessionmaker,
     settings: SettingsService,
     redis_client: Any,
+    addressed: bool = True,
 ) -> bool:
-    """聊天模式下把消息交给模型；返回 True 表示已经回复，调用方无需再处理。"""
+    """聊天模式下把消息交给模型；返回 True 表示已经处理，调用方无需再处理。
+
+    群聊未 @ 机器人的消息交给模型自行判断，模型认为无需回应时不发送任何消息。
+    """
 
     if target.platform != "onebot":
         return False
@@ -839,17 +850,16 @@ def _try_chat_answer(
             target.openid,
             ttl_seconds=llm_settings(settings.snapshot).chat_mode_ttl_seconds,
         )
-    client.send_text(target, "正在思考…")
-    client.send_text(
-        target,
-        _answer_with_llm(
-            text=text,
-            target=target,
-            session_factory=session_factory,
-            settings=settings,
-            redis_client=redis_client,
-        ),
+    reply = _answer_with_llm(
+        text=text,
+        target=target,
+        session_factory=session_factory,
+        settings=settings,
+        redis_client=redis_client,
+        addressed=addressed,
     )
+    if reply:
+        client.send_text(target, reply)
     return True
 
 
@@ -943,9 +953,11 @@ def handle_message(
         return
 
     text = str(data.get("content") or "").strip()
+    addressed = True
     if event_type == "GROUP_MESSAGE_CREATE":
         mentioned = "<@" in text or bool(data.get("mentions"))
-        if not mentioned:
+        addressed = mentioned
+        if not mentioned and not is_onebot:
             return
         text = re.sub(r"<@!?[^>]+>", "", text).strip()
     logger.info(
@@ -976,6 +988,21 @@ def handle_message(
         return
 
     try:
+        if target.kind == "group" and not addressed:
+            # 群里没有 @ 机器人的普通消息：只有开启聊天模式才交给模型判断
+            # 是否需要回应，未开启时直接忽略。
+            if get_chat_mode(redis_client, target.openid) is not None:
+                _try_chat_answer(
+                    text=text,
+                    target=target,
+                    client=client,
+                    session_factory=session_factory,
+                    settings=settings,
+                    redis_client=redis_client,
+                    addressed=False,
+                )
+            return
+
         command = match_chat_command(text)
         if command is not None:
             # 聊天模式开关只对个人号群生效，@ 机器人发送即可。

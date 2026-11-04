@@ -508,7 +508,11 @@ FACTORS: tuple[FactorSpec, ...] = (
         category="low",
         value_type="number",
         ops=NUMERIC_OPS,
-        description="当前后复权收盘价相对最近 N 个交易日最低价的涨幅，0.1 表示 10%。",
+        description=(
+            "当前后复权收盘价相对最近 N 个交易日最低价的涨幅，0.1 表示 10%；"
+            "涨幅越小说明越靠近窗口低点（0 表示正处于窗口最低价）。"
+            "历史不足 N 个交易日时按上市以来的全部日线判断。"
+        ),
         params=(DAYS_LOW, MIN_OBS),
     ),
 )

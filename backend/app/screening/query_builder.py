@@ -316,40 +316,88 @@ def _window_expression(
             .scalar_subquery()
         )
     if field in {"close_pct_rank", "price_from_low_pct"}:
+        # SQLite 没有 DISTINCT ON，latest_* 不去重会把同一标的展开成多行：
+        # 窗口统计必须以「本次窗口」为范围，否则会连同窗口外的历史一起统计。
         min_obs_ratio = float(params.get("min_obs_ratio", 0.8))
         min_rows = max(1, math.ceil(days * min_obs_ratio))
-        count_all = func.count().filter(DailyBar.close_adj.isnot(None))
+        count_all = func.count().filter(
+            DailyBar.close_adj.isnot(None),
+            DailyBar.trade_date >= start,
+            DailyBar.trade_date <= as_of,
+        )
         base_filter = [
             DailyBar.instrument_id == Instrument.id,
             DailyBar.trade_date >= start,
             DailyBar.trade_date <= as_of,
         ]
         if field == "close_pct_rank":
-            count_le = func.count().filter(
-                DailyBar.close_adj <= latest_bar.c.close_adj
+            # latest_bar 是外层 JOIN 的别名，不能出现在标量子查询的 FROM 里
+            # （SQLite 下会变成笛卡尔积）。这里用相关子查询重新取最新收盘价。
+            latest_close_adj = (
+                select(DailyBar.close_adj)
+                .where(
+                    DailyBar.instrument_id == Instrument.id,
+                    DailyBar.trade_date <= as_of,
+                )
+                .order_by(DailyBar.trade_date.desc())
+                .limit(1)
+                .correlate(Instrument)
+                .scalar_subquery()
             )
+            count_le = func.count().filter(DailyBar.close_adj <= latest_close_adj)
             rank_expr = case(
-                (latest_bar.c.close_adj.is_(None), None),
-                (
-                    count_all < min_rows,
-                    None,
-                ),
+                (latest_close_adj.is_(None), None),
+                (count_all < min_rows, None),
                 else_=count_le * 1.0 / func.nullif(count_all, 0),
             )
             return (
                 select(rank_expr)
                 .where(*base_filter)
+                .correlate(Instrument)
                 .scalar_subquery()
             )
         count_min = func.min(DailyBar.close_adj)
+        # 窗口内样本不足（新股、历史数据未回补完整）时，只要求「现有数据」够判断
+        # 当前价是否贴近低点：取 min(窗口天数, 上市至今交易日数) 作为应有样本。
+        listed_rows = (
+            select(func.count())
+            .select_from(DailyBar)
+            .where(
+                DailyBar.instrument_id == Instrument.id,
+                DailyBar.trade_date <= as_of,
+                DailyBar.close_adj.isnot(None),
+            )
+            .correlate(Instrument)
+            .scalar_subquery()
+        )
+        available_rows = case(
+            (listed_rows < days, listed_rows), else_=days
+        )
+        required_rows = case(
+            (available_rows < min_rows, available_rows),
+            else_=min_rows,
+        )
+        # 同上：用相关子查询取最新收盘价，避免把外层 latest_bar 别名带进 FROM。
+        latest_close_adj = (
+            select(DailyBar.close_adj)
+            .where(
+                DailyBar.instrument_id == Instrument.id,
+                DailyBar.trade_date <= as_of,
+            )
+            .order_by(DailyBar.trade_date.desc())
+            .limit(1)
+            .correlate(Instrument)
+            .scalar_subquery()
+        )
         ratio_expr = case(
-            (latest_bar.c.close_adj.is_(None), None),
-            (count_all < min_rows, None),
-            else_=latest_bar.c.close_adj / func.nullif(count_min, 0) - 1,
+            (latest_close_adj.is_(None), None),
+            (count_all < required_rows, None),
+            else_=latest_close_adj / func.nullif(count_min, 0) - 1,
         )
         return (
             select(ratio_expr)
             .where(*base_filter)
+            .correlate(Instrument)
             .scalar_subquery()
         )
     raise FactorError(f"unsupported window field: {field}")
@@ -531,7 +579,9 @@ def _latest_ctes(as_of: date):
             ShareholderCount.holder_change_pct.label("holder_change_pct"),
             ShareholderCount.holder_change.label("holder_change"),
             ShareholderCount.period_end.label("holder_period_end"),
+            ShareholderCount.period_end.label("period_end"),
             ShareholderCount.announce_date.label("holder_announce_date"),
+            ShareholderCount.announce_date.label("announce_date"),
         )
         .where(ShareholderCount.announce_date <= as_of)
         .distinct(ShareholderCount.instrument_id)
@@ -581,6 +631,13 @@ def build_screen(
     predicates = []
     extra_columns: dict[str, Any] = {}
     extra_fields: list[dict[str, Any]] = []
+
+    # SQLite 忽略 DISTINCT ON，latest_* 不去重；价格分位类条件的求值维度
+    # 是「每个标的一行」，因此外层以标的为主表、CTE 只作为相关子查询取值。
+    low_rank_used = any(
+        condition.field in {"close_pct_rank", "price_from_low_pct"}
+        for condition in request.conditions
+    )
 
     def expression_for(field: str, params: dict[str, Any]):
         factor = get_factor(field)
@@ -643,19 +700,64 @@ def build_screen(
     where_clause = (
         and_(*predicates) if request.logic == "and" else or_(*predicates)
     )
-    base_from = (
-        select(Instrument.id)
-        .select_from(Instrument)
-        .outerjoin(latest_bar, latest_bar.c.instrument_id == Instrument.id)
-        .outerjoin(latest_holder, latest_holder.c.instrument_id == Instrument.id)
-        .outerjoin(latest_fin, latest_fin.c.instrument_id == Instrument.id)
-        .where(
+    def base_select(model=None, columns=()):
+        """按主表构造查询；排名类条件不 JOIN latest_bar，避免 SQLite 多行展开。"""
+
+        statement = select(*columns).select_from(Instrument)
+        statement = statement.outerjoin(
+            latest_holder, latest_holder.c.instrument_id == Instrument.id
+        ).outerjoin(latest_fin, latest_fin.c.instrument_id == Instrument.id)
+        if not low_rank_used:
+            statement = statement.outerjoin(
+                latest_bar, latest_bar.c.instrument_id == Instrument.id
+            )
+        return statement.where(
             Instrument.asset_type == "stock",
             Instrument.status == "active",
             where_clause,
         )
-    )
+
+    base_from = base_select(columns=(Instrument.id,))
     count_statement = select(func.count()).select_from(base_from.subquery())
+
+    if low_rank_used:
+        # SQLite 忽略 DISTINCT ON：latest_bar 不能出现在 FROM，改为按标的相关取值。
+        latest_bar_columns = [
+            (
+                select(bar_column)
+                .where(
+                    DailyBar.instrument_id == Instrument.id,
+                    DailyBar.trade_date <= as_of,
+                )
+                .order_by(DailyBar.trade_date.desc())
+                .limit(1)
+                .correlate(Instrument)
+                .scalar_subquery()
+                .label(label)
+            )
+            for bar_column, label in (
+                (DailyBar.trade_date, "trade_date"),
+                (DailyBar.close, "close"),
+                (DailyBar.pct_chg, "pct_chg"),
+                (DailyBar.pe_ttm, "pe_ttm"),
+                (DailyBar.pb, "pb"),
+                (DailyBar.turnover_rate, "turnover_rate"),
+                (DailyBar.amount, "amount"),
+            )
+        ]
+    else:
+        latest_bar_columns = [
+            latest_bar.c[key].label(key)
+            for key in (
+                "trade_date",
+                "close",
+                "pct_chg",
+                "pe_ttm",
+                "pb",
+                "turnover_rate",
+                "amount",
+            )
+        ]
 
     columns = [
         Instrument.symbol.label("symbol"),
@@ -667,13 +769,7 @@ def build_screen(
         func.coalesce(literal(as_of) - Instrument.list_date, 999999).label(
             "list_days"
         ),
-        latest_bar.c.trade_date.label("trade_date"),
-        latest_bar.c.close.label("close"),
-        latest_bar.c.pct_chg.label("pct_chg"),
-        latest_bar.c.pe_ttm.label("pe_ttm"),
-        latest_bar.c.pb.label("pb"),
-        latest_bar.c.turnover_rate.label("turnover_rate"),
-        latest_bar.c.amount.label("amount"),
+        *latest_bar_columns,
         latest_holder.c.holder_num.label("holder_num"),
         latest_holder.c.holder_change_pct.label("holder_change_pct"),
         latest_holder.c.holder_period_end.label("holder_period_end"),
@@ -686,17 +782,8 @@ def build_screen(
         latest_fin.c.operating_cash_flow.label("operating_cash_flow"),
         latest_fin.c.eps.label("eps"),
     ]
-    statement = (
-        select(*columns, *extra_columns.values())
-        .select_from(Instrument)
-        .outerjoin(latest_bar, latest_bar.c.instrument_id == Instrument.id)
-        .outerjoin(latest_holder, latest_holder.c.instrument_id == Instrument.id)
-        .outerjoin(latest_fin, latest_fin.c.instrument_id == Instrument.id)
-        .where(
-            Instrument.asset_type == "stock",
-            Instrument.status == "active",
-            where_clause,
-        )
+    statement = base_select(
+        columns=(*columns, *extra_columns.values())
     )
     if sort_expressions:
         for expression, order in sort_expressions:
@@ -782,9 +869,18 @@ def evaluate_condition(
 
     number = _coerce_number(actual)
     if number is None:
-        if op == "gte" and float(target) <= 0:
-            # 计数类条件（例如「涨停次数 ≥ 0」）没有记录本身就是 0 次，可以满足。
-            return "pass", 0.0, "没有记录（按 0 计）"
+        numeric_target = (
+            float(target)
+            if isinstance(target, (int, float)) and not isinstance(target, bool)
+            else None
+        )
+        if numeric_target is not None:
+            if op == "gte" and numeric_target <= 0:
+                # 计数类条件（例如「涨停次数 ≥ 0」）没有记录本身就是 0 次。
+                return "pass", 0.0, "没有记录（按 0 计）"
+            if op == "lte" and numeric_target >= 0:
+                # 缺少数据时不知道是否真的低于上限，不能判定为满足。
+                return VERDICT_UNKNOWN, None, "缺少该项数据，无法判断是否低于上限"
         return VERDICT_UNKNOWN, None, "缺少该项数据，无法判断"
 
     def gapped(value: float, text: str) -> tuple[str, float, str]:
@@ -896,6 +992,43 @@ def compare_instrument(
         for days in sorted(limit_windows)
     }
 
+    low_obs_counts: dict[tuple[str, int], tuple[int, int]] = {}
+    for _, factor, params, _ in evaluated:
+        if factor.key not in {"close_pct_rank", "price_from_low_pct"}:
+            continue
+        days = int(params["days"])
+        key = (factor.key, days)
+        if key in low_obs_counts:
+            continue
+        start = _window_start(db, as_of, days)
+        rows_in_window = int(
+            db.scalar(
+                select(func.count())
+                .select_from(DailyBar)
+                .where(
+                    DailyBar.instrument_id == instrument.id,
+                    DailyBar.trade_date >= start,
+                    DailyBar.trade_date <= as_of,
+                    DailyBar.close_adj.isnot(None),
+                )
+            )
+            or 0
+        )
+        total_rows = int(
+            db.scalar(
+                select(func.count())
+                .select_from(DailyBar)
+                .where(
+                    DailyBar.instrument_id == instrument.id,
+                    DailyBar.trade_date <= as_of,
+                    DailyBar.close_adj.isnot(None),
+                )
+            )
+            or 0
+        )
+        min_rows = max(1, math.ceil(days * float(params.get("min_obs_ratio", 0.8))))
+        low_obs_counts[key] = (rows_in_window, min(total_rows, min_rows))
+
     results: list[dict[str, Any]] = []
     passed = failed = unknown = 0
     for index, (condition, factor, params, value) in enumerate(evaluated):
@@ -924,6 +1057,20 @@ def compare_instrument(
             "gap": gap,
             "reason": reason,
         }
+        if factor.key in {"close_pct_rank", "price_from_low_pct"}:
+            rows_in_window, required = low_obs_counts.get(
+                (factor.key, int(params["days"])), (0, 0)
+            )
+            if actual is None:
+                item["reason"] = (
+                    f"窗口内只有 {rows_in_window} 个交易日数据，"
+                    f"至少需要 {required} 个交易日才能判断"
+                )
+            item["detail"] = {
+                "windows": rows_in_window,
+                "required": required,
+                "days": int(params["days"]),
+            }
         if factor.key in {"limit_up_count", "limit_down_count"}:
             counts = limit_counts.get(int(params["days"]))
             if counts:

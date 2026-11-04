@@ -411,7 +411,10 @@ SETTING_SPECS: tuple[SettingSpec, ...] = (
         group="sync",
         type="bool",
         default=True,
-        description="每天 16:00 收盘后同步当日数据，并用默认条件筛选后向 QQ 群汇报。",
+        description=(
+            "每天收盘后先拉取目标交易日的行情，再用默认条件筛选并推送到"
+            "已启用的 QQ 机器人频道；官方/个人号机器人未启用时跳过对应推送。"
+        ),
         order=105,
         tags=("pipeline",),
     ),
@@ -421,7 +424,11 @@ SETTING_SPECS: tuple[SettingSpec, ...] = (
         group="sync",
         type="cron",
         default="0 16 * * *",
-        description="每日数据拉取与 QQ 群汇报执行时间，时区 Asia/Shanghai。",
+        description=(
+            "每日数据拉取与 QQ 群汇报执行时间，时区 Asia/Shanghai。"
+            "15:00 收盘后触发时会先等当日行情落定（15:05）再拉取，"
+            "拉取并校验通过后才筛选推送。"
+        ),
         order=106,
         tags=("pipeline", "cron"),
     ),

@@ -236,7 +236,7 @@ def _empty_payload(
     }
 
 
-def _front_adjust_ratio(frame: pd.DataFrame, *, symbol: str) -> pd.Series:
+def front_adjust_ratio(frame: pd.DataFrame, *, symbol: str) -> pd.Series:
     """返回前复权系数（每行 * 原始价格 = 展示价格），最后一行系数固定为 1。
 
     QSA 的 adj_factor 来自 BaoStock backAdjustFactor（后复权因子，随分红送转
@@ -302,7 +302,7 @@ def build_technical_payload(
             message="暂无有效日线数据",
         )
 
-    ratio = _front_adjust_ratio(frame, symbol=instrument.symbol)
+    ratio = front_adjust_ratio(frame, symbol=instrument.symbol)
     for column in ("open", "high", "low", "close"):
         frame[column] = frame[column] * ratio
     frame = frame.dropna(subset=["open", "high", "low", "close"])

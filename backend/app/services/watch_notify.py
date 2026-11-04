@@ -198,7 +198,7 @@ def _release(redis_client: Any, keys: list[str]) -> None:
 
 
 def _build_official_client(settings: Any, redis_client: Any, config: Any) -> Any:
-    """按系统设置构造官方 QQ 客户端；设置缺失或异常时返回 None。"""
+    """按系统设置构造官方 QQ 客户端；机器人未启用或设置异常时返回 None。"""
 
     try:
         from app.core.config import get_config
@@ -206,6 +206,9 @@ def _build_official_client(settings: Any, redis_client: Any, config: Any) -> Any
 
         cfg = config or get_config()
         snapshot = settings.snapshot
+        # 官方机器人关闭时不要构造客户端，也不要做任何推送尝试。
+        if not snapshot.get_bool("qq_bot.enabled"):
+            return None
         client = QQBotClient(
             app_id=(
                 snapshot.get_str("qq_bot.app_id") or cfg.qq_bot_app_id
@@ -226,9 +229,11 @@ def _build_personal_client(settings: Any, redis_client: Any, config: Any) -> Any
     try:
         from app.core.config import get_config
 
-        return build_onebot_client(
-            settings.snapshot, redis_client, config or get_config()
-        )
+        snapshot = settings.snapshot
+        # 个人号通道关闭时不要构造客户端，也不要做任何推送尝试。
+        if not snapshot.get_bool("personal_qq.enabled"):
+            return None
+        return build_onebot_client(snapshot, redis_client, config or get_config())
     except Exception:
         logger.warning("构造个人号客户端失败，跳过个人号群提醒", exc_info=True)
         return None

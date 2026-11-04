@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -12,6 +12,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.models.trading_calendar import TradingCalendar
 from app.sync.bars import (
+    MARKET_CLOSE_TIME,
+    MARKET_DATA_READY_TIME,
     backfill_baostock_bars,
     backfill_bse_bars,
     recompute_limit_events,
@@ -48,6 +50,12 @@ PIPELINE_NAMES = (
 
 def today_shanghai() -> date:
     return datetime.now(SHANGHAI).date()
+
+
+def daily_report_cutoff(today: date, now: datetime) -> date:
+    """日报目标日上界：15:00 收盘后取当天，收盘前只取到前一天。"""
+
+    return today if now.time() >= MARKET_CLOSE_TIME else today - timedelta(days=1)
 
 
 def _ensure_not_cancelled(cancel_check) -> None:
@@ -135,7 +143,7 @@ def _sync_bars_for_day(
     today = today_shanghai()
     if target_date == today:
         now = datetime.now(SHANGHAI)
-        if now.time() < time(15, 5):
+        if now.time() < MARKET_DATA_READY_TIME:
             raise RuntimeError("市场尚未收盘，不能同步当日行情")
         result = sync_incremental_bars(
             db,
@@ -573,11 +581,7 @@ def run_pipeline(
         ensure_calendar(db)
         today = today_shanghai()
         if name == "daily_report":
-            cutoff = (
-                today
-                if datetime.now(SHANGHAI).time() >= time(15, 5)
-                else today - timedelta(days=1)
-            )
+            cutoff = daily_report_cutoff(today, datetime.now(SHANGHAI))
             current_target = target_date or latest_trading_day(db, cutoff) or cutoff
         else:
             current_target = target_date or latest_trading_day(db, today) or today

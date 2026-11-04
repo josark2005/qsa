@@ -18,7 +18,13 @@ BackfillSource = Literal["tencent", "baostock", "full"]
 
 
 class SyncRequestCreate(BaseModel):
-    kind: Literal["pipeline", "backfill", "full_backfill", "history_import"]
+    kind: Literal[
+        "pipeline",
+        "backfill",
+        "full_backfill",
+        "history_import",
+        "repair_adj_factors",
+    ]
     pipeline: PipelineName | None = None
     target_date: date | None = None
     start: date | None = None

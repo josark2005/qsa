@@ -378,6 +378,19 @@ def create_sync_request(
                 "history_import_active",
                 "已有历史数据导入任务在队列或执行中",
             )
+    if payload.kind == "repair_adj_factors":
+        active = db.scalars(
+            select(SyncRequest).where(
+                SyncRequest.kind == "repair_adj_factors",
+                SyncRequest.status.in_(["queued", "running", "cancelling"]),
+            )
+        ).all()
+        if active:
+            raise api_error(
+                409,
+                "repair_adj_factors_active",
+                "已有复权因子修复任务在队列或执行中",
+            )
     data = payload.model_dump(mode="json", exclude={"kind", "pipeline"})
     entry = SyncRequest(
         kind=payload.kind,

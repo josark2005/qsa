@@ -6,8 +6,8 @@ import pandas as pd
 
 from app.analytics.indicators import (
     _add_indicators,
-    _front_adjust_ratio,
     build_technical_payload,
+    front_adjust_ratio,
 )
 from app.core.db import Base, make_engine, make_session_factory
 from app.models.daily_bar import DailyBar
@@ -115,6 +115,6 @@ def test_front_adjust_still_applies_for_consistent_factors() -> None:
             "adj_factor": [2.0, 2.0, 2.42],
         }
     )
-    ratio = _front_adjust_ratio(frame, symbol="600299.SH")
+    ratio = front_adjust_ratio(frame, symbol="600299.SH")
     assert round(float(ratio.iloc[0]), 6) == round(2.0 / 2.42, 6)
     assert float(ratio.iloc[-1]) == 1.0

@@ -62,7 +62,7 @@ export function LoginPage() {
             <Shield className="size-5" />
           </div>
           <div>
-            <div className="text-lg font-semibold">QSA 选股工作台</div>
+            <div className="text-lg font-semibold">QSA工作台</div>
             <div className="text-xs text-zinc-400">screening workspace</div>
           </div>
         </div>

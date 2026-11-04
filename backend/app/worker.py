@@ -20,6 +20,7 @@ from app.core.settings_service import SettingsService
 from app.core.settings_watcher import SettingsWatcher
 from app.datasources.baostock import log_baostock_transport
 from app.models.sync_request import SyncRequest
+from app.services.adjustment_repair import repair_adjustment_factors
 from app.services.history_archive import DEFAULT_HISTORY_DIR, import_history
 from app.services.worker_logs import (
     CURRENT_SYNC_REQUEST,
@@ -336,6 +337,22 @@ class RequestWorker:
                     db,
                     source_dir=directory,
                     force=bool(payload.get("force", False)),
+                    progress_callback=lambda update: self._update_progress(
+                        request_id, update
+                    ),
+                    cancel_check=lambda: self._is_cancelling(request_id),
+                )
+        if request["kind"] == "repair_adj_factors":
+            asset_type = payload.get("asset_type") or "all"
+            if asset_type not in {"stock", "etf", "all"}:
+                raise ValueError(f"unsupported asset_type: {asset_type}")
+            symbols = payload.get("symbols") or None
+            with self.session_factory() as db:
+                return repair_adjustment_factors(
+                    db,
+                    symbols=list(symbols) if symbols else None,
+                    asset_type=asset_type,
+                    apply=True,
                     progress_callback=lambda update: self._update_progress(
                         request_id, update
                     ),

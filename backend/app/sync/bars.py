@@ -24,6 +24,10 @@ from app.sync.quality import record_cross_source_issue
 logger = logging.getLogger(__name__)
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+# 收盘时间与行情落定时间。收盘后行情源需要几分钟才能给出当日最终收盘数据，
+# 在 MARKET_DATA_READY_TIME 之前不把“今天”当作可同步的交易日。
+MARKET_CLOSE_TIME = time(15, 0)
+MARKET_DATA_READY_TIME = time(15, 5)
 BAR_UPDATE_COLUMNS = [
     "open",
     "high",
@@ -80,7 +84,7 @@ def _price_mismatch(new_value: float | None, old_value: float | None) -> bool:
 def _effective_end_date(end_date: date) -> date:
     now = datetime.now(SHANGHAI)
     if end_date >= now.date() and (
-        end_date > now.date() or now.time() < time(15, 5)
+        end_date > now.date() or now.time() < MARKET_DATA_READY_TIME
     ):
         return now.date() - timedelta(days=1)
     return end_date
@@ -152,6 +156,7 @@ def _prepare_baostock_rows(
     raw: pd.DataFrame,
     factors: pd.DataFrame,
     calendar: CalendarIndex,
+    fallback_factor: float | None = None,
 ) -> list[dict]:
     if raw.empty:
         return []
@@ -160,7 +165,8 @@ def _prepare_baostock_rows(
     df = df.dropna(subset=["trade_date"]).sort_values("trade_date")
 
     if factors.empty:
-        df["adj_factor"] = 1.0
+        # 因子接口失败时继承上一根已知因子，避免把新 K 线写成 1.0。
+        df["adj_factor"] = fallback_factor if fallback_factor is not None else 1.0
     else:
         factor_df = factors.copy()
         factor_df["divid_date"] = pd.to_datetime(
@@ -181,7 +187,10 @@ def _prepare_baostock_rows(
             right_on="divid_date",
             direction="backward",
         )
-        df["adj_factor"] = df["backAdjustFactor"].fillna(1.0)
+        df["adj_factor"] = df["backAdjustFactor"]
+        if fallback_factor is not None:
+            df["adj_factor"] = df["adj_factor"].fillna(fallback_factor)
+        df["adj_factor"] = df["adj_factor"].fillna(1.0)
 
     rows: list[dict] = []
     for _, row in df.iterrows():
@@ -306,6 +315,9 @@ def backfill_baostock_bars(
                 item_end = instrument.delist_date
             if item_start > item_end:
                 continue
+            inherited_factor = _latest_factor_before(
+                db, instrument.id, item_start
+            )
             try:
                 raw = client.fetch_history(
                     instrument.symbol,
@@ -318,7 +330,13 @@ def backfill_baostock_bars(
                 factors = client.fetch_adjust_factors(
                     instrument.symbol, "1990-01-01", item_end.isoformat()
                 )
-                rows = _prepare_baostock_rows(instrument, raw, factors, calendar)
+                rows = _prepare_baostock_rows(
+                    instrument,
+                    raw,
+                    factors,
+                    calendar,
+                    fallback_factor=inherited_factor,
+                )
                 if verify_existing and rows:
                     dates = [row["trade_date"] for row in rows]
                     existing = {
@@ -417,6 +435,30 @@ def backfill_baostock_bars(
     }
 
 
+def _latest_factor_before(
+    db: Session, instrument_id: int, before: date
+) -> float | None:
+    """返回该标的在 before 之前最后一根已知的后复权因子。
+
+    与 sync_incremental_bars 的 _latest_factor_map 同口径（继承最新已知因子）：
+    Tencent 补数或 BaoStock 因子获取失败时，继承上一根因子可以保持复权序列连续，
+    避免把最新 K 线写成 1.0 造成因子回退。
+    """
+
+    value = db.scalar(
+        select(DailyBar.adj_factor)
+        .where(
+            DailyBar.instrument_id == instrument_id,
+            DailyBar.trade_date < before,
+            DailyBar.adj_factor.is_not(None),
+            DailyBar.adj_factor > 0,
+        )
+        .order_by(DailyBar.trade_date.desc())
+        .limit(1)
+    )
+    return float(value) if value is not None else None
+
+
 def backfill_tencent_bars(
     db: Session,
     *,
@@ -504,6 +546,12 @@ def backfill_tencent_bars(
                 item_end = instrument.delist_date
             if item_start > item_end:
                 continue
+            # 无论是 Tencent 单源补数还是 BaoStock 因子缺失，都继承该标的上一个
+            # 已知因子（与 sync_incremental_bars 的 _latest_factor_map 同口径），
+            # 避免新 K 线把 adj_factor 写成 1.0 造成因子回退。
+            inherited_factor = _latest_factor_before(
+                db, instrument.id, item_start
+            )
             fetch_start = max(item_start - timedelta(days=10), date(1990, 1, 1))
             try:
                 raw = client.fetch_history(
@@ -548,7 +596,15 @@ def backfill_tencent_bars(
                         right_on="divid_date",
                         direction="backward",
                     )
-                    df["adj_factor"] = df["backAdjustFactor"].fillna(1.0)
+                    df["adj_factor"] = df["backAdjustFactor"]
+                    if inherited_factor is not None:
+                        df["adj_factor"] = df["adj_factor"].fillna(
+                            inherited_factor
+                        )
+                    df["adj_factor"] = df["adj_factor"].fillna(1.0)
+                elif inherited_factor is not None:
+                    # 没有 BaoStock 因子时继承上一根已知因子，保持复权序列连续。
+                    df["adj_factor"] = inherited_factor
                 df["close_adj"] = (
                     pd.to_numeric(df["close"], errors="coerce") * df["adj_factor"]
                 )
@@ -726,6 +782,7 @@ def backfill_bse_bars(
             item_start = max(item_start, last_date + timedelta(days=1))
         if item_start > end_date:
             continue
+        inherited_factor = _latest_factor_before(db, instrument.id, item_start)
         try:
             raw = ak.fetch_bse_history(
                 instrument.code, item_start.strftime("%Y%m%d"), end_date.strftime("%Y%m%d")
@@ -749,8 +806,12 @@ def backfill_bse_bars(
                 adj_factor = (
                     close_adj / close
                     if close_adj is not None and close not in (None, 0)
-                    else 1.0
+                    else (
+                        inherited_factor if inherited_factor is not None else 1.0
+                    )
                 )
+                if close_adj is None and close is not None:
+                    close_adj = close * adj_factor
                 days = calendar.trading_day_number(instrument.list_date, trade_date)
                 up_limit, down_limit = compute_limit_prices(
                     asset_type="stock",
@@ -853,7 +914,7 @@ def sync_incremental_bars(
     symbols: list[str] | None = None,
 ) -> dict:
     now = datetime.now(SHANGHAI)
-    if target_date == now.date() and now.time() < time(15, 5):
+    if target_date == now.date() and now.time() < MARKET_DATA_READY_TIME:
         raise RuntimeError("市场尚未收盘，不能同步当日增量行情")
 
     instruments = list(

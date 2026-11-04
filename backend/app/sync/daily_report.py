@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from datetime import date
+from datetime import date, datetime
+from time import sleep
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -27,6 +29,9 @@ from app.services.report_pdf import build_report_pdf
 from app.services.screen_reports import create_report_snapshot
 from app.services.watch_notify import notify_watch_announcements
 from app.sync.bars import (
+    MARKET_CLOSE_TIME,
+    MARKET_DATA_READY_TIME,
+    backfill_baostock_bars,
     backfill_bse_bars,
     backfill_tencent_bars,
     recompute_limit_events,
@@ -43,6 +48,9 @@ from app.sync.runs import StepRun
 from app.sync.universe import sync_universe
 
 logger = logging.getLogger(__name__)
+SHANGHAI = ZoneInfo("Asia/Shanghai")
+# 等待行情落定时按小片 sleep，保证停止请求能在一秒级内生效。
+WAIT_SLICE_SECONDS = 5.0
 
 
 def _missing_symbols(
@@ -102,11 +110,12 @@ def _subscribed_targets(db: Session) -> list[ChatTarget]:
 
 
 def _notify(
-    client: QQBotClient,
+    client: QQBotClient | None,
     targets: list[ChatTarget],
     text: str,
 ) -> None:
-    if not client.configured:
+    # 机器人未启用或未配置时直接跳过，不要尝试登录/发送。
+    if client is None or not client.configured:
         return
     for target in targets:
         try:
@@ -116,13 +125,13 @@ def _notify(
 
 
 def _notify_personal(
-    client: OneBotClient,
+    client: OneBotClient | None,
     targets: list[ChatTarget],
     text: str,
 ) -> bool:
     """向个人号 OneBot 群推送纯文本；任何失败都只记录日志，不影响官方流程。"""
 
-    if not client.configured or not targets:
+    if client is None or not client.configured or not targets:
         return False
     sent = False
     for target in targets:
@@ -201,6 +210,88 @@ def _data_ready(
     return ready, reason
 
 
+def _baostock_has_bars(
+    target_date: date,
+    symbols: list[str],
+    asset_type: str,
+) -> bool:
+    """用少量标的探测 BaoStock 是否已有目标交易日日线。
+
+    BaoStock 的日线通常在收盘后较晚才更新；15:00 档的日报如果在 BaoStock 上
+    探测不到当日数据，就跳过全市场 BaoStock 空查询，直接走 Tencent 兜底。
+    """
+
+    if not symbols:
+        return False
+    try:
+        from app.datasources.baostock import BaoStockClient
+
+        with BaoStockClient() as client:
+            for symbol in symbols[:5]:
+                frame = client.fetch_history(
+                    symbol,
+                    target_date.isoformat(),
+                    target_date.isoformat(),
+                    asset_type=asset_type,
+                )
+                if not frame.empty:
+                    return True
+    except Exception:
+        logger.warning(
+            "探测 BaoStock 当日数据失败，改用 Tencent 兜底补齐",
+            exc_info=True,
+        )
+    return False
+
+
+def market_data_wait_seconds(target_date: date, now: datetime) -> float:
+    """当日刚收盘时返回需要等待行情落定的秒数，其它情况返回 0。"""
+
+    if target_date != now.date() or now.time() < MARKET_CLOSE_TIME:
+        return 0.0
+    ready_at = datetime.combine(
+        target_date, MARKET_DATA_READY_TIME, tzinfo=SHANGHAI
+    )
+    return max(0.0, (ready_at - now).total_seconds())
+
+
+def _wait_for_market_data(
+    target_date: date,
+    *,
+    cancel_check=None,
+    progress_callback: Callable[[dict], None] | None = None,
+) -> None:
+    """先等当日行情落定再拉取数据，避免日报用上未落定的行情。"""
+
+    remaining = market_data_wait_seconds(target_date, datetime.now(SHANGHAI))
+    if remaining <= 0:
+        return
+    if progress_callback is not None:
+        progress_callback(
+            {
+                "phase": "wait_market_data",
+                "message": (
+                    "等待当日行情落定"
+                    f"（{MARKET_DATA_READY_TIME.strftime('%H:%M')}）后拉取数据"
+                ),
+                "percent": 0,
+            }
+        )
+    while remaining > 0:
+        if cancel_check is not None and cancel_check():
+            raise SyncCancelled("用户停止任务")
+        sleep(min(WAIT_SLICE_SECONDS, remaining))
+        remaining -= WAIT_SLICE_SECONDS
+    if progress_callback is not None:
+        progress_callback(
+            {
+                "phase": "wait_market_data",
+                "message": "当日行情已落定，开始拉取数据",
+                "percent": 100,
+            }
+        )
+
+
 def run_daily_report_pipeline(
     db: Session,
     session_factory: sessionmaker,
@@ -215,22 +306,33 @@ def run_daily_report_pipeline(
     config = get_config()
     run_id = uuid.uuid4()
     snapshot = settings.snapshot
-    app_id = (snapshot.get_str("qq_bot.app_id") or config.qq_bot_app_id).strip()
-    app_secret = (
-        snapshot.get_str("qq_bot.app_secret") or config.qq_bot_app_secret
-    ).strip()
-    client = QQBotClient(
-        app_id=app_id,
-        app_secret=app_secret,
-        redis_client=redis_client,
-        api_base=config.qq_bot_api_base,
-    )
-    targets = _subscribed_targets(db)
+    # 先检查两个机器人通道是否启用：未启用的通道不构造客户端、不读取订阅群，
+    # 后续所有推送都会被跳过，避免对关闭的机器人发起登录或发送。
+    official_enabled = snapshot.get_bool("qq_bot.enabled")
     personal_enabled = snapshot.get_bool("personal_qq.enabled")
-    personal_client = build_onebot_client(snapshot, redis_client, config)
-    personal_groups = (
-        list_personal_targets(db) if personal_enabled else []
-    )
+    client: QQBotClient | None = None
+    official_ready = False
+    targets: list[ChatTarget] = []
+    if official_enabled:
+        app_id = (
+            snapshot.get_str("qq_bot.app_id") or config.qq_bot_app_id
+        ).strip()
+        app_secret = (
+            snapshot.get_str("qq_bot.app_secret") or config.qq_bot_app_secret
+        ).strip()
+        client = QQBotClient(
+            app_id=app_id,
+            app_secret=app_secret,
+            redis_client=redis_client,
+            api_base=config.qq_bot_api_base,
+        )
+        official_ready = client.configured
+        targets = _subscribed_targets(db) if official_ready else []
+    personal_client: OneBotClient | None = None
+    personal_groups: list[ChatTarget] = []
+    if personal_enabled:
+        personal_client = build_onebot_client(snapshot, redis_client, config)
+        personal_groups = list_personal_targets(db)
     results: dict[str, Any] = {}
     errors: dict[str, str] = {}
     personal_notified = False
@@ -301,43 +403,112 @@ def run_daily_report_pipeline(
     )
     run_step("universe", lambda: sync_universe(db))
 
+    # 15:00 收盘后立即触发时，先等当日行情落定（15:05）再拉取，
+    # 保证筛选和推送用的是当天已落定的数据，而不是昨天的旧数据。
+    _wait_for_market_data(
+        target_date,
+        cancel_check=cancel_check,
+        progress_callback=progress_callback,
+    )
+
     missing_stock = _missing_symbols(
         db, target_date=target_date, asset_type="stock", exchanges=("SH", "SZ")
     )
     missing_etf = _missing_symbols(
         db, target_date=target_date, asset_type="etf", exchanges=("SH", "SZ")
     )
+    # BaoStock 日线要到晚间才更新；先探测一次，没有目标日数据就直接走 Tencent，
+    # 避免对全市场做一轮必然为空的 BaoStock 查询。
+    probe_symbols = missing_stock or missing_etf
+    baostock_ready = (
+        _baostock_has_bars(
+            target_date,
+            probe_symbols,
+            "stock" if missing_stock else "etf",
+        )
+        if probe_symbols
+        else False
+    )
+    if probe_symbols and not baostock_ready and progress_callback is not None:
+        progress_callback(
+            {
+                "phase": "bars_stock",
+                "message": "BaoStock 尚无目标交易日数据，改用 Tencent 补齐",
+                "percent": 0,
+            }
+        )
+
+    def fill_missing_bars(
+        asset_type: str,
+        *,
+        exchanges: tuple[str, ...],
+        phase: str,
+    ) -> list[str]:
+        """补齐目标日缺失日线：BaoStock 可用时优先，否则/仍缺时用 Tencent 兜底。
+
+        BaoStock 能同时返回正确的后复权因子；Tencent 兜底会继承上一根已知因子，
+        不会把 adj_factor 写成 1.0（避免因子回退假跌）。
+        """
+
+        remaining = _missing_symbols(
+            db,
+            target_date=target_date,
+            asset_type=asset_type,
+            exchanges=exchanges,
+        )
+        if not remaining:
+            return []
+        if baostock_ready:
+            run_step(
+                f"{phase}_baostock",
+                lambda: backfill_baostock_bars(
+                    db,
+                    start_date=target_date,
+                    end_date=target_date,
+                    asset_type=asset_type,
+                    symbols=remaining,
+                    progress_callback=bar_progress(f"{phase}_baostock"),
+                    progress_every=5,
+                ),
+            )
+            remaining = _missing_symbols(
+                db,
+                target_date=target_date,
+                asset_type=asset_type,
+                exchanges=exchanges,
+            )
+        if remaining:
+            # BaoStock 登录失败或没有当日数据时用 Tencent 兜底。
+            run_step(
+                f"{phase}_tencent",
+                lambda: backfill_tencent_bars(
+                    db,
+                    start_date=target_date,
+                    end_date=target_date,
+                    asset_type=asset_type,
+                    symbols=remaining,
+                    include_adjust_factors=False,
+                    progress_callback=bar_progress(f"{phase}_tencent"),
+                    progress_every=2,
+                ),
+            )
+            remaining = _missing_symbols(
+                db,
+                target_date=target_date,
+                asset_type=asset_type,
+                exchanges=exchanges,
+            )
+        return remaining
+
+    missing_stock = fill_missing_bars(
+        "stock", exchanges=("SH", "SZ"), phase="bars_stock"
+    )
+    missing_etf = fill_missing_bars(
+        "etf", exchanges=("SH", "SZ"), phase="bars_etf"
+    )
     missing_bse = _missing_symbols(
         db, target_date=target_date, asset_type="stock", exchanges=("BJ",)
     )
-    if missing_stock:
-        run_step(
-            "bars_stock",
-            lambda: backfill_tencent_bars(
-                db,
-                start_date=target_date,
-                end_date=target_date,
-                asset_type="stock",
-                symbols=missing_stock,
-                include_adjust_factors=False,
-                progress_callback=bar_progress("bars_stock"),
-                progress_every=2,
-            ),
-        )
-    if missing_etf:
-        run_step(
-            "bars_etf",
-            lambda: backfill_tencent_bars(
-                db,
-                start_date=target_date,
-                end_date=target_date,
-                asset_type="etf",
-                symbols=missing_etf,
-                include_adjust_factors=False,
-                progress_callback=bar_progress("bars_etf"),
-                progress_every=2,
-            ),
-        )
     if missing_bse:
         run_step(
             "bars_bse",
@@ -349,6 +520,9 @@ def run_daily_report_pipeline(
                 progress_callback=bar_progress("bars_bse"),
                 progress_every=2,
             ),
+        )
+        missing_bse = _missing_symbols(
+            db, target_date=target_date, asset_type="stock", exchanges=("BJ",)
         )
 
     run_step(
@@ -377,9 +551,7 @@ def run_daily_report_pipeline(
             target_date=target_date,
             official_client=client,
             official_targets=targets,
-            personal_client=(
-                personal_client if personal_enabled else None
-            ),
+            personal_client=personal_client,
             personal_targets=personal_groups,
         ),
     )
@@ -416,7 +588,10 @@ def run_daily_report_pipeline(
             "personal_groups": len(personal_groups),
             "personal_notified": personal_notified,
             "report_token": None,
-            "notified": not not targets and client.configured,
+            "official_enabled": official_enabled,
+            "official_ready": official_ready,
+            "personal_enabled": personal_enabled,
+            "notified": bool(targets) and official_ready,
             "errors": errors,
         }
 
@@ -462,11 +637,12 @@ def run_daily_report_pipeline(
             f"入选：{report.total} 只\n报表：{link}\n"
             "（个人号通道，PDF 请打开链接查看）",
         )
-        try:
-            pdf_path = build_report_pdf(
-                db, report, public_base_url=base_url
-            )
-            if client.configured:
+        # 官方机器人未启用/未配置或没有订阅群时不再构建 PDF，避免无意义的耗时构建。
+        if official_ready and targets:
+            try:
+                pdf_path = build_report_pdf(
+                    db, report, public_base_url=base_url
+                )
                 for target in targets:
                     try:
                         file_info = client.upload_file(
@@ -483,9 +659,9 @@ def run_daily_report_pipeline(
                             [target],
                             "PDF 发送失败，请使用上方报表链接查看。",
                         )
-        except Exception:
-            logger.exception("daily report PDF build failed")
-            _notify(client, targets, "PDF 生成失败，请使用上方报表链接查看。")
+            except Exception:
+                logger.exception("daily report PDF build failed")
+                _notify(client, targets, "PDF 生成失败，请使用上方报表链接查看。")
         for subscription in db.scalars(
             select(QQGroupSubscription).where(
                 QQGroupSubscription.active.is_(True)
@@ -537,6 +713,9 @@ def run_daily_report_pipeline(
         "subscribed_groups": len(targets),
         "personal_groups": len(personal_groups),
         "personal_notified": personal_notified,
-        "notified": bool(targets) and client.configured,
+        "official_enabled": official_enabled,
+        "official_ready": official_ready,
+        "personal_enabled": personal_enabled,
+        "notified": bool(targets) and official_ready,
         "errors": errors,
     }

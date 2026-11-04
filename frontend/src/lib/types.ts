@@ -474,7 +474,12 @@ export interface LLMMemoryListResponse {
 }
 
 export interface SyncRequestCreate {
-  kind: "pipeline" | "backfill" | "full_backfill" | "history_import"
+  kind:
+    | "pipeline"
+    | "backfill"
+    | "full_backfill"
+    | "history_import"
+    | "repair_adj_factors"
   pipeline?: string | null
   target_date?: string | null
   start?: string | null

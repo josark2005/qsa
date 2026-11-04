@@ -84,7 +84,7 @@ export function AppLayout() {
             <Shield className="size-4" />
           </div>
           <div className="leading-tight">
-            <div className="text-sm font-semibold">QSA 选股工作台</div>
+            <div className="text-sm font-semibold">QSA工作台</div>
             <div className="text-[11px] text-muted-foreground">条件筛选</div>
           </div>
         </div>
@@ -114,7 +114,7 @@ export function AppLayout() {
         <header className="sticky top-0 z-20 flex h-14 items-center justify-between border-b bg-background/95 px-4 backdrop-blur md:px-8">
           <div className="flex items-center gap-2 md:hidden">
             <Shield className="size-4" />
-            <span className="text-sm font-semibold">QSA</span>
+            <span className="text-sm font-semibold">QSA工作台</span>
           </div>
           <div className="ml-auto">
           <DropdownMenu>

@@ -11,6 +11,7 @@ import {
   RefreshCw,
   Square,
   Users,
+  Wrench,
 } from "lucide-react"
 import { toast } from "sonner"
 
@@ -265,6 +266,9 @@ function requestTaskLabel(request: SyncRequest): string {
   if (request.kind === "history_import") {
     return request.payload.force ? "强制导入历史数据" : "导入历史数据"
   }
+  if (request.kind === "repair_adj_factors") {
+    return "修复复权因子"
+  }
   if (request.kind === "full_backfill" || request.payload.source === "full") {
     return "全量多源回补"
   }
@@ -285,6 +289,14 @@ function requestTarget(request: SyncRequest): string {
   }
   if (request.kind === "history_import") {
     return "data/history"
+  }
+  if (request.kind === "repair_adj_factors") {
+    const assetType = String(request.payload.asset_type ?? "all")
+    return assetType === "all"
+      ? "全部标的"
+      : assetType === "etf"
+        ? "ETF"
+        : "沪深/北交所标的"
   }
   const payload = request.payload
   const source =
@@ -318,6 +330,13 @@ function requestSummary(request: SyncRequest): string {
   if (verification?.checked !== undefined) {
     parts.push(
       `核对 ${verification.checked} 条 · 差异 ${verification.mismatched ?? 0}`,
+    )
+  }
+  if (typeof result.instruments_fixed === "number") {
+    parts.push(
+      `扫描 ${Number(result.instruments_scanned ?? 0)} 只 · 修复 ${Number(
+        result.instruments_fixed ?? 0,
+      )} 只 · ${Number(result.rows_updated ?? 0)} 行`,
     )
   }
   const errors = result.errors as Record<string, string> | undefined
@@ -452,6 +471,9 @@ export function DataPage() {
   const activeDaily = runningRequests.some(
     (item) => item.kind === "pipeline" && item.pipeline === "daily_report",
   )
+  const activeRepair = runningRequests.some(
+    (item) => item.kind === "repair_adj_factors",
+  )
   const progressRef = useRef<{
     id: number
     phase: string
@@ -550,6 +572,18 @@ export function DataPage() {
       pipeline: "daily_report",
       target_date: null,
     })
+  }
+
+  function submitRepair() {
+    if (activeRepair) {
+      toast.error("已有复权因子修复任务在运行或排队")
+      return
+    }
+    const message =
+      "将扫描全部日线的后复权因子，把回退/缺失的因子按前向最大值补齐并重算 close_adj。" +
+      "会逐只标的写入数据库，可能持续几分钟，确定继续吗？"
+    if (!window.confirm(message)) return
+    requestMutation.mutate({ kind: "repair_adj_factors", asset_type: "all" })
   }
 
   function submitFullBackfill() {
@@ -656,8 +690,8 @@ export function DataPage() {
         <CardHeader className="pb-3">
           <CardTitle className="text-base">日常回补</CardTitle>
           <CardDescription>
-            只补齐上一交易日缺失的日线数据（含北交所），完成后使用默认筛选条件选股，
-            并向已订阅的 QQ 群推送报表链接和 PDF。每日 16:00 收盘后自动执行。
+            收盘后先拉取目标交易日缺失的日线数据（含北交所），校验通过后再用默认筛选条件
+            选股，并向已订阅且已启用的 QQ 机器人推送报表链接和 PDF。每日 16:00 自动执行。
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -678,6 +712,36 @@ export function DataPage() {
               <RefreshCw className="size-4" />
             )}
             {activeDaily ? "日常回补执行中" : "执行日常回补"}
+          </Button>
+        </CardContent>
+      </Card>
+
+      <Card id="repair-section">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">数据修复</CardTitle>
+          <CardDescription>
+            扫描日线后复权因子，把回退/缺失的因子按前向最大值补齐并重算
+            close_adj（等同终端执行 repair-adj-factors --apply）。修复后 K
+            线与指标刷新即可，旧 PDF 缓存里的指标表不会自动变化。
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <p className="text-xs leading-5 text-muted-foreground">
+            {activeRepair
+              ? "复权因子修复任务正在运行或排队。"
+              : "运行日志出现「adjustment factor series is inconsistent」告警、或 K 线出现假跳空时使用。"}
+          </p>
+          <Button
+            variant="outline"
+            onClick={submitRepair}
+            disabled={requestMutation.isPending || activeRepair}
+          >
+            {requestMutation.isPending || activeRepair ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : (
+              <Wrench className="size-4" />
+            )}
+            {activeRepair ? "修复执行中" : "修复复权因子"}
           </Button>
         </CardContent>
       </Card>

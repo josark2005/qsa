@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -9,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.models.daily_bar import DailyBar
 from app.models.instrument import Instrument
+from app.sync.cancellation import SyncCancelled
 
 logger = logging.getLogger(__name__)
 
@@ -84,11 +86,14 @@ def repair_adjustment_factors(
     limit: int | None = None,
     apply: bool = False,
     sample_limit: int = 20,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """修复 daily_bars.adj_factor 回退/缺失，并重算 close_adj。
 
     默认 dry-run（只统计不写库）；apply=True 时按标的逐个提交。返回可直接
-    作为 CLI JSON 输出的汇总信息。
+    作为 CLI JSON 输出的汇总信息。progress_callback / cancel_check 供 worker
+    队列任务展示进度与响应停止请求。
     """
     statement = select(Instrument.id, Instrument.symbol).order_by(Instrument.symbol)
     if symbols:
@@ -99,14 +104,35 @@ def repair_adjustment_factors(
         statement = statement.limit(limit)
     instruments = list(db.execute(statement).all())
 
+    total = len(instruments)
     scanned = 0
     fixed = 0
     rows_updated = 0
     samples: list[FactorRepairSample] = []
     errors: list[dict[str, str]] = []
 
+    def emit_progress(current: str | None) -> None:
+        if progress_callback is None:
+            return
+        progress_callback(
+            {
+                "phase": "repair_adj_factors",
+                "message": f"扫描 {current}" if current else "扫描复权因子",
+                "processed": scanned,
+                "total": total,
+                "percent": round(scanned / total * 100, 2) if total else 0,
+                "fixed": fixed,
+                "rows_updated": rows_updated,
+            }
+        )
+
+    emit_progress(None)
     for instrument_id, symbol in instruments:
+        if cancel_check is not None and cancel_check():
+            raise SyncCancelled("用户停止任务")
         scanned += 1
+        if scanned == 1 or scanned % 20 == 0:
+            emit_progress(symbol)
         try:
             bars = list(
                 db.scalars(
@@ -154,6 +180,7 @@ def repair_adjustment_factors(
                     bar.close_adj = float(bar.close) * factor
             db.commit()
 
+    emit_progress(None)
     return {
         "mode": "applied" if apply else "dry-run",
         "instruments_scanned": scanned,

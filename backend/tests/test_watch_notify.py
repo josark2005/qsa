@@ -9,7 +9,7 @@ from app.core.settings_service import SettingsSnapshot
 from app.models.financial_report import FinancialReport
 from app.models.instrument import Instrument
 from app.models.shareholder_count import ShareholderCount
-from app.qq_bot.client import ChatTarget
+from app.qq_bot.client import ChatTarget, QQBotClient
 from app.services.watch_notify import (
     NOTIFIED_PREFIX,
     collect_watch_announcements,
@@ -203,6 +203,45 @@ def test_notify_watch_announcements_no_targets_keeps_dedup(
         )
     assert result["notified"] is True
     assert len(official.messages) == 1
+
+
+def test_notify_watch_announcements_skips_disabled_official_bot(
+    app_fixture, container, monkeypatch
+) -> None:
+    """qq_bot.enabled 关闭时，即使凭据齐全也不构造客户端、不尝试推送。"""
+
+    _seed(
+        container,
+        report_announce=date(2026, 11, 4),
+        holder_announce=date(2026, 11, 4),
+    )
+    values = dict(container.settings_service.snapshot.values)
+    values.update(
+        {
+            "qq_bot.enabled": False,
+            "qq_bot.app_id": "app-id",
+            "qq_bot.app_secret": "app-secret",
+        }
+    )
+    container.settings_service._snapshot = SettingsSnapshot(values, {}, None)
+
+    sent: list[str] = []
+    monkeypatch.setattr(
+        QQBotClient, "send_text", lambda self, target, text: sent.append(text)
+    )
+    with container.session_factory() as db:
+        result = notify_watch_announcements(
+            db,
+            settings=container.settings_service,
+            redis_client=container.redis,
+            target_date=date(2026, 11, 4),
+            official_targets=[_group_target()],
+            personal_targets=[],
+        )
+    assert result["notified"] is False
+    assert sent == []
+    # 没有成功推送时不占用去重标记。
+    assert container.redis.keys(f"{NOTIFIED_PREFIX}*") == []
 
 
 def test_notify_watch_announcements_personal_channel(

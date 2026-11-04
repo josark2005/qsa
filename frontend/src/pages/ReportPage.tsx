@@ -140,14 +140,14 @@ export function ReportPage() {
 
   useEffect(() => {
     if (report) {
-      document.title = `${report.title} · QSA`
+      document.title = `${report.title} · QSA工作台`
     }
     const robots = document.createElement("meta")
     robots.name = "robots"
     robots.content = "noindex,nofollow"
     document.head.appendChild(robots)
     return () => {
-      document.title = "QSA 选股工作台"
+      document.title = "QSA工作台"
       robots.remove()
     }
   }, [report])

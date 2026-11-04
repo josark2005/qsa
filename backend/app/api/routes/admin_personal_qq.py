@@ -14,6 +14,7 @@ from app.models.personal_qq_group import PersonalQQGroup
 from app.qq_bot.client import ChatTarget
 from app.qq_bot.onebot.client import OneBotAPIError, OneBotClient
 from app.qq_bot.onebot.service import CONNECTED_KEY
+from app.services.llm_chat import usage_snapshot
 from app.services.personal_qq import (
     build_onebot_client,
     delete_personal_group,
@@ -191,6 +192,8 @@ def personal_qq_status(
         "chat_groups": chat_groups,
         "chat_mode_ttl_seconds": chat_mode_ttl_seconds,
         "chat_mode_users": chat_mode_users,
+        # 今日 token 用量（Asia/Shanghai 自然日），供管理端展示。
+        "llm_usage_today": usage_snapshot(container.redis),
     }
 
 

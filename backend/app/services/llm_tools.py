@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from contextlib import contextmanager
 from datetime import date, datetime
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
@@ -12,7 +14,9 @@ from sqlalchemy.orm import Session
 from app.models.daily_bar import DailyBar
 from app.models.financial_report import FinancialReport
 from app.models.instrument import Instrument
+from app.models.limit_event import LimitEvent
 from app.models.shareholder_count import ShareholderCount
+from app.models.trading_calendar import TradingCalendar
 from app.schemas.screening import ConditionIn, ScreenRequest
 from app.screening.query_builder import ScreenError, build_screen
 from app.screening.registry import FactorError, FACTORS, factor_metadata
@@ -29,6 +33,8 @@ MAX_LIMIT = 20
 # 网页搜索返回条数：条数越多，塞进上下文的 token 越多。
 DEFAULT_WEB_SEARCH_LIMIT = 5
 MAX_WEB_SEARCH_LIMIT = 10
+# 涨跌幅榜默认条数。
+DEFAULT_TOP_LIMIT = 10
 DEFAULT_SEARCH_LIMIT = 10
 DEFAULT_HISTORY_DAYS = 60
 MIN_HISTORY_DAYS = 5
@@ -39,6 +45,14 @@ MAX_CANDIDATES = 5
 SCREEN_FETCH_PAGESIZE = 100
 
 DATA_NOTE = "数据来自 QSA 本地库，可能不是最新交易日。"
+SHANGHAI = ZoneInfo("Asia/Shanghai")
+WEEKDAY_LABELS = ("一", "二", "三", "四", "五", "六", "日")
+BOARD_LABELS = {
+    "主板": "main",
+    "创业板": "gem",
+    "科创板": "star",
+    "北交所": "bse",
+}
 
 WEB_SEARCH_DISABLED = "网页搜索未启用"
 WEB_SEARCH_UNCONFIGURED = (
@@ -207,6 +221,81 @@ def tool_definitions(*, include_web_search: bool = True) -> list[dict[str, Any]]
     """OpenAI tools 数组，元素形如 {"type": "function", "function": {"name":..., "description":..., "parameters": {...JSON Schema...}}}"""
 
     tools: list[dict[str, Any]] = [
+        _function(
+            "list_watch_instruments",
+            "列出当前关注列表（关注标的的财报/公告会推送到订阅群）。"
+            f"{DATA_NOTE}",
+            {},
+            [],
+        ),
+        _function(
+            "add_watch_instrument",
+            "把标的加入关注列表；加入后该标的的财报与股东户数公告会推送到已订阅的群。"
+            "参数 symbol 支持代码或名称。"
+            f"{DATA_NOTE}",
+            {
+                "symbol": {
+                    "type": "string",
+                    "description": "标的代码或名称，例如 600519、600519.SH、贵州茅台",
+                },
+                "note": {
+                    "type": "string",
+                    "description": "可选的关注备注，例如“等待三季报”",
+                },
+            },
+            ["symbol"],
+        ),
+        _function(
+            "remove_watch_instrument",
+            "把标的移出关注列表；不在列表时返回 removed=false。"
+            f"{DATA_NOTE}",
+            {
+                "symbol": {
+                    "type": "string",
+                    "description": "标的代码或名称",
+                },
+            },
+            ["symbol"],
+        ),
+        _function(
+            "get_market_status",
+            "查询当前日期、星期、今天是否交易日、最近交易日，以及本地行情、"
+            "财报与股东数据的更新日期。回答日期、星期或数据是否最新之前先调用。"
+            f"{DATA_NOTE}",
+            {},
+            [],
+        ),
+        _function(
+            "get_market_overview",
+            "查询最新交易日的市场概况：上涨/下跌/平盘家数、涨停跌停家数、"
+            "平均涨跌幅与总成交额（单位：元）。" + DATA_NOTE,
+            {},
+            [],
+        ),
+        _function(
+            "get_top_movers",
+            "查询最新交易日的涨跌幅榜（涨幅或跌幅前 N 名），可按板块筛选。"
+            f"{DATA_NOTE}",
+            {
+                "direction": {
+                    "type": "string",
+                    "enum": ["up", "down"],
+                    "description": "up 表示涨幅榜，down 表示跌幅榜，默认 up",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "返回条数上限，1-20，默认 10",
+                    "minimum": 1,
+                    "maximum": MAX_LIMIT,
+                },
+                "board": {
+                    "type": "string",
+                    "enum": ["主板", "创业板", "科创板", "北交所"],
+                    "description": "可选，限定板块",
+                },
+            },
+            [],
+        ),
         _function(
             "search_instruments",
             "按名称、代码或证券代码模糊搜索标的，返回代码、名称、板块、行业与最新收盘。"
@@ -813,6 +902,246 @@ def _list_screening_factors(
     return {"factors": factors, "total": len(factors)}
 
 
+def _market_status(
+    db: Session, arguments: dict[str, Any]
+) -> dict[str, Any]:
+    del arguments  # 无参数
+    now = datetime.now(SHANGHAI)
+    today = now.date()
+    open_today = db.scalar(
+        select(TradingCalendar.is_open).where(
+            TradingCalendar.exchange == "CN",
+            TradingCalendar.cal_date == today,
+        )
+    )
+    latest_trade_date = db.scalar(
+        select(func.max(TradingCalendar.cal_date)).where(
+            TradingCalendar.exchange == "CN",
+            TradingCalendar.is_open.is_(True),
+            TradingCalendar.cal_date <= today,
+        )
+    )
+    recent_days = list(
+        db.scalars(
+            select(TradingCalendar.cal_date)
+            .where(
+                TradingCalendar.exchange == "CN",
+                TradingCalendar.is_open.is_(True),
+                TradingCalendar.cal_date <= today,
+            )
+            .order_by(TradingCalendar.cal_date.desc())
+            .limit(5)
+        ).all()
+    )
+    latest_bar = latest_stock_bar_date(db)
+    latest_fin = db.scalar(select(func.max(FinancialReport.announce_date)))
+    latest_holder = db.scalar(select(func.max(ShareholderCount.announce_date)))
+    return {
+        "now": now.strftime("%Y-%m-%d %H:%M"),
+        "weekday": f"星期{WEEKDAY_LABELS[now.weekday()]}",
+        "is_trading_day": (
+            bool(open_today) if open_today is not None else None
+        ),
+        "latest_trade_date": _date_str(latest_trade_date),
+        "latest_bar_date": _date_str(latest_bar),
+        "latest_financial_announce_date": _date_str(latest_fin),
+        "latest_holder_announce_date": _date_str(latest_holder),
+        "recent_trade_days": [
+            _date_str(day) for day in reversed(recent_days)
+        ],
+        "note": DATA_NOTE,
+    }
+
+
+def _market_overview(
+    db: Session, arguments: dict[str, Any]
+) -> dict[str, Any]:
+    del arguments  # 无参数，统计最新有行情的交易日
+    as_of = latest_stock_bar_date(db)
+    if as_of is None:
+        raise ToolArgumentError("本地库还没有日线数据，无法统计市场概况")
+    rows = db.execute(
+        select(DailyBar.pct_chg, DailyBar.amount)
+        .join(Instrument, Instrument.id == DailyBar.instrument_id)
+        .where(
+            DailyBar.trade_date == as_of,
+            Instrument.asset_type == "stock",
+            Instrument.status == "active",
+        )
+    ).all()
+    changes = [float(row.pct_chg) for row in rows if row.pct_chg is not None]
+    up = sum(1 for value in changes if value > 0)
+    down = sum(1 for value in changes if value < 0)
+    flat = sum(1 for value in changes if value == 0)
+    total_amount = sum(float(row.amount or 0) for row in rows)
+    limit_up = int(
+        db.scalar(
+            select(func.count())
+            .select_from(LimitEvent)
+            .where(
+                LimitEvent.trade_date == as_of,
+                LimitEvent.direction == "up",
+                LimitEvent.is_close_limit.is_(True),
+            )
+        )
+        or 0
+    )
+    limit_down = int(
+        db.scalar(
+            select(func.count())
+            .select_from(LimitEvent)
+            .where(
+                LimitEvent.trade_date == as_of,
+                LimitEvent.direction == "down",
+                LimitEvent.is_close_limit.is_(True),
+            )
+        )
+        or 0
+    )
+    return {
+        "date": _date_str(as_of),
+        "total": len(rows),
+        "traded": len(changes),
+        "up": up,
+        "down": down,
+        "flat": flat,
+        "limit_up": limit_up,
+        "limit_down": limit_down,
+        "avg_pct_chg": round(sum(changes) / len(changes), 2) if changes else None,
+        "total_amount": round(total_amount, 2),
+        "note": DATA_NOTE,
+    }
+
+
+def _top_movers(
+    db: Session, arguments: dict[str, Any]
+) -> dict[str, Any]:
+    direction = (_as_str_arg(arguments, "direction", required=False) or "up").lower()
+    if direction not in {"up", "down"}:
+        raise ToolArgumentError("参数 direction 只能是 up 或 down")
+    limit = _as_int_arg(
+        arguments, "limit", DEFAULT_TOP_LIMIT, minimum=1, maximum=MAX_LIMIT
+    )
+    board_text = _as_str_arg(arguments, "board", required=False)
+    board = None
+    if board_text:
+        board = BOARD_LABELS.get(board_text, board_text)
+        if board not in set(BOARD_LABELS.values()):
+            raise ToolArgumentError(
+                "参数 board 只能是 主板 / 创业板 / 科创板 / 北交所"
+            )
+    as_of = latest_stock_bar_date(db)
+    if as_of is None:
+        raise ToolArgumentError("本地库还没有日线数据，无法统计涨跌幅榜")
+    statement = (
+        select(
+            Instrument.symbol,
+            Instrument.code,
+            Instrument.name,
+            Instrument.board,
+            DailyBar.close,
+            DailyBar.pct_chg,
+            DailyBar.turnover_rate,
+            DailyBar.amount,
+        )
+        .join(Instrument, Instrument.id == DailyBar.instrument_id)
+        .where(
+            DailyBar.trade_date == as_of,
+            DailyBar.pct_chg.is_not(None),
+            Instrument.asset_type == "stock",
+            Instrument.status == "active",
+        )
+    )
+    if board:
+        statement = statement.where(Instrument.board == board)
+    order = DailyBar.pct_chg.desc() if direction == "up" else DailyBar.pct_chg.asc()
+    rows = db.execute(statement.order_by(order).limit(limit)).mappings().all()
+    items = [
+        {
+            "symbol": row["symbol"],
+            "code": row["code"],
+            "name": row["name"],
+            "board": row["board"],
+            "close": _num(row["close"]),
+            "pct_chg": _num(row["pct_chg"]),
+            "turnover_rate": _num(row["turnover_rate"]),
+            "amount": _num(row["amount"]),
+        }
+        for row in rows
+    ]
+    return {
+        "date": _date_str(as_of),
+        "direction": direction,
+        "board": board,
+        "items": items,
+        "note": DATA_NOTE,
+    }
+
+
+def _watch_item_payload(db: Session, item: Any) -> dict[str, Any]:
+    instrument = db.scalar(
+        select(Instrument).where(Instrument.id == item.instrument_id)
+    )
+    return {
+        "id": item.id,
+        "symbol": instrument.symbol if instrument else None,
+        "code": instrument.code if instrument else None,
+        "name": instrument.name if instrument else None,
+        "board": instrument.board if instrument else None,
+        "industry": instrument.industry if instrument else None,
+        "note": item.note,
+        "active": bool(item.active),
+    }
+
+
+def _add_watch_instrument(
+    db: Session, arguments: dict[str, Any]
+) -> dict[str, Any]:
+    from app.services.watchlist import WatchlistError, add_watch
+
+    raw = _as_str_arg(arguments, "symbol", required=True)
+    note = _as_str_arg(arguments, "note", required=False) or None
+    try:
+        item = add_watch(db, raw, note=note)
+        db.commit()
+    except WatchlistError as exc:
+        db.rollback()
+        raise ToolArgumentError(str(exc)) from exc
+    return {"ok": True, "item": _watch_item_payload(db, item)}
+
+
+def _remove_watch_instrument(
+    db: Session, arguments: dict[str, Any]
+) -> dict[str, Any]:
+    from app.services.watchlist import WatchlistError, remove_watch
+
+    raw = _as_str_arg(arguments, "symbol", required=True)
+    try:
+        removed = remove_watch(db, raw)
+        db.commit()
+    except WatchlistError as exc:
+        db.rollback()
+        raise ToolArgumentError(str(exc)) from exc
+    return {
+        "ok": True,
+        "removed": bool(removed),
+        "message": "已取消关注" if removed else "该标的原本不在关注列表",
+    }
+
+
+def _list_watch_instruments(
+    db: Session, arguments: dict[str, Any]
+) -> dict[str, Any]:
+    from app.services.watchlist import list_watch_items
+
+    del arguments
+    items = [
+        _watch_item_payload(db, item)
+        for item in list_watch_items(db)
+    ]
+    return {"items": items, "total": len(items), "note": DATA_NOTE}
+
+
 def _web_search_tool(
     arguments: dict[str, Any], *, snapshot: Any
 ) -> dict[str, Any]:
@@ -855,6 +1184,12 @@ def _web_search_configured(snapshot: Any) -> bool:
 # ---------------------------------------------------------------------------
 
 _TOOLS: dict[str, Callable[..., dict[str, Any]]] = {
+    "list_watch_instruments": _list_watch_instruments,
+    "add_watch_instrument": _add_watch_instrument,
+    "remove_watch_instrument": _remove_watch_instrument,
+    "get_market_status": _market_status,
+    "get_market_overview": _market_overview,
+    "get_top_movers": _top_movers,
     "search_instruments": _search_instruments,
     "get_instrument_profile": _get_instrument_profile,
     "get_price_history": _get_price_history,
@@ -864,36 +1199,84 @@ _TOOLS: dict[str, Callable[..., dict[str, Any]]] = {
 _DB_TOOLS = frozenset(_TOOLS)
 
 
+def _log_tool_call(
+    name: str,
+    arguments: Any,
+    text: str,
+    started: float,
+    *,
+    status: str,
+) -> None:
+    """记录每次工具调用的结构化日志：工具名、参数、耗时与结果大小。"""
+
+    try:
+        args_text = json.dumps(arguments, ensure_ascii=False, default=str)
+    except Exception:  # pragma: no cover - 防御性兜底
+        args_text = str(arguments)
+    if len(args_text) > 300:
+        args_text = args_text[:299] + "…"
+    duration_ms = int((time.monotonic() - started) * 1000)
+    logger.info(
+        "LLM 工具调用 tool=%s status=%s duration_ms=%s args=%s result_chars=%s",
+        name or "-",
+        status,
+        duration_ms,
+        args_text,
+        len(text or ""),
+    )
+
+
 def run_tool(
     name: str, arguments: dict[str, Any], *, session_factory, snapshot
 ) -> str:
     """执行工具，返回 JSON 字符串（ensure_ascii=False）。任何错误都返回中文错误字符串，绝不抛异常。"""
 
+    started = time.monotonic()
+    label = name.strip() if isinstance(name, str) else str(name or "")
+    text: str
+    status = "ok"
     try:
-        if not isinstance(name, str) or not name.strip():
-            return _error("缺少工具名称")
-        name = name.strip()
-        if arguments is None:
-            arguments = {}
-        if not isinstance(arguments, dict):
-            return _error(f"工具 {name} 的参数必须是 JSON 对象")
-
-        if name == "web_search":
-            payload = _web_search_tool(arguments, snapshot=snapshot)
-            return _dumps(payload)
-
-        handler = _TOOLS.get(name)
-        if handler is None:
-            return _error(f"未知工具：{name}")
-
-        with session_factory() as db:
-            payload = handler(db, arguments)
-        return _dumps(payload)
+        text = _dispatch_tool(
+            name, arguments, session_factory=session_factory, snapshot=snapshot
+        )
+        if text.startswith('{"error"'):
+            status = "error"
     except ToolArgumentError as exc:
-        return _error(str(exc))
+        text = _error(str(exc))
+        status = "invalid_arguments"
     except WebSearchError as exc:
         logger.warning("网页搜索失败：%s", exc)
-        return _error(f"网页搜索失败：{exc}")
+        text = _error(f"网页搜索失败：{exc}")
+        status = "error"
     except Exception as exc:  # 兜底：任何异常都转成中文错误文本
-        logger.warning("工具 %s 执行异常：%s: %s", name, type(exc).__name__, exc)
-        return _error(f"工具 {name} 执行失败：{type(exc).__name__}: {exc}")
+        logger.warning("工具 %s 执行异常：%s: %s", label, type(exc).__name__, exc)
+        text = _error(f"工具 {label} 执行失败：{type(exc).__name__}: {exc}")
+        status = "error"
+    _log_tool_call(label, arguments, text, started, status=status)
+    return text
+
+
+def _dispatch_tool(
+    name: str, arguments: dict[str, Any], *, session_factory, snapshot
+) -> str:
+    """执行具体工具并返回 JSON 字符串；异常由 run_tool 统一兜底。"""
+
+    if not isinstance(name, str) or not name.strip():
+        return _error("缺少工具名称")
+    name = name.strip()
+    if arguments is None:
+        arguments = {}
+    if not isinstance(arguments, dict):
+        return _error(f"工具 {name} 的参数必须是 JSON 对象")
+
+    if name == "web_search":
+        payload = _web_search_tool(arguments, snapshot=snapshot)
+        return _dumps(payload)
+
+    handler = _TOOLS.get(name)
+    if handler is None:
+        return _error(f"未知工具：{name}")
+
+    with session_factory() as db:
+        payload = handler(db, arguments)
+    return _dumps(payload)

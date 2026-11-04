@@ -96,7 +96,8 @@ def test_status_default_fields(app_fixture) -> None:
     assert isinstance(payload["llm_tools_enabled"], bool)
     assert isinstance(payload["llm_web_search_enabled"], bool)
     assert payload["chat_groups"] == 0
-    assert payload["chat_mode_ttl_seconds"] == 3600
+    # 聊天模式默认 30 分钟无消息自动关闭。
+    assert payload["chat_mode_ttl_seconds"] == 1800
     assert payload["chat_mode_users"] == []
 
 
@@ -223,3 +224,43 @@ def test_delete_chat_mode(app_fixture, llm_snapshot) -> None:
     )
     assert again.status_code == 200
     assert again.json() == {"ok": True}
+
+
+def test_personal_qq_status_reports_llm_usage(app_fixture) -> None:
+    from app.services.llm_chat import UsageCounter, record_usage
+
+    container = app_fixture.client.app.state.container
+    app_fixture.login_admin()
+    payload = app_fixture.client.get("/api/admin/personal-qq/status").json()
+    usage = payload["llm_usage_today"]
+    assert set(usage) == {
+        "date",
+        "requests",
+        "prompt_tokens",
+        "completion_tokens",
+        "cached_tokens",
+        "total_tokens",
+        "tool_calls",
+    }
+    assert usage["requests"] == 0
+
+    record_usage(
+        container.redis,
+        UsageCounter(
+            requests=2,
+            prompt_tokens=100,
+            completion_tokens=20,
+            cached_tokens=40,
+            total_tokens=120,
+            tool_calls=1,
+        ),
+    )
+    updated = app_fixture.client.get(
+        "/api/admin/personal-qq/status"
+    ).json()["llm_usage_today"]
+    assert updated["requests"] == 2
+    assert updated["prompt_tokens"] == 100
+    assert updated["completion_tokens"] == 20
+    assert updated["cached_tokens"] == 40
+    assert updated["tool_calls"] == 1
+

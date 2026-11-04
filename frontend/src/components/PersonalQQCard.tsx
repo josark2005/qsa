@@ -53,7 +53,11 @@ import {
 } from "@/components/ui/table"
 import { api, ApiError } from "@/lib/api"
 import { formatDateTime } from "@/lib/format"
-import type { PersonalQQGroup, PersonalQQStatus } from "@/lib/types"
+import type {
+  LLMUsageStats,
+  PersonalQQGroup,
+  PersonalQQStatus,
+} from "@/lib/types"
 
 function errorMessage(error: unknown): string {
   if (error instanceof ApiError) return error.message
@@ -80,6 +84,22 @@ function numericGroupId(group: PersonalQQGroup): number {
 function chatModeLabel(mode: string): string {
   if (mode === "mention") return "仅 @ 触发"
   return mode || "—"
+}
+
+function formatNumber(value: number): string {
+  return Number.isFinite(value) ? value.toLocaleString("zh-CN") : "0"
+}
+
+function tokenUsageText(usage: LLMUsageStats | undefined): string {
+  if (!usage || !usage.requests) return "—"
+  const parts = [
+    "输入 " + formatNumber(usage.prompt_tokens),
+    "输出 " + formatNumber(usage.completion_tokens),
+  ]
+  if (usage.cached_tokens) {
+    parts.push("缓存 " + formatNumber(usage.cached_tokens))
+  }
+  return parts.join(" · ")
 }
 
 function remainingTtlText(ttlSeconds: number): string {
@@ -347,6 +367,19 @@ export function PersonalQQCard() {
                   </div>
                 ) : null}
               </InfoCell>
+              <InfoCell label="今日 LLM 用量">
+                <div className="mt-1 font-medium">
+                  {tokenUsageText(status.llm_usage_today)}
+                </div>
+                <div className="mt-0.5 text-[11px] text-muted-foreground">
+                  {status.llm_usage_today?.requests
+                    ? status.llm_usage_today.requests +
+                      " 次请求 · " +
+                      status.llm_usage_today.tool_calls +
+                      " 次工具调用"
+                    : "今天还没有对话"}
+                </div>
+              </InfoCell>
             </div>
             {!status.configured ? (
               <p className="text-xs text-muted-foreground">
@@ -374,7 +407,7 @@ export function PersonalQQCard() {
               ) : null}
             </div>
             <div className="text-xs text-muted-foreground">
-              群内 @ 机器人发送「开启聊天模式」后，本群消息会交给模型判断是否需要回应，不必每条都 @；发送「关闭聊天模式」退出，超过有效期自动关闭。私聊可直接提问。
+              群内 @ 机器人即自动开启聊天模式（默认 30 分钟无消息自动关闭），之后本群消息会交给模型判断是否需要回应，不必每条都 @；发送「关闭聊天模式」可立即退出。私聊可直接提问。
             </div>
           </div>
 

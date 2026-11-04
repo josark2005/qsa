@@ -387,3 +387,39 @@ def test_admin_logs_api_validation(app_fixture) -> None:
 
     too_large_limit = app_fixture.client.get("/api/admin/logs?limit=501")
     assert too_large_limit.status_code == 422
+
+
+def test_handler_only_loggers_filter(tmp_path) -> None:
+    engine, factory = _make_store(tmp_path)
+    try:
+        handler = WorkerLogHandler(
+            factory,
+            only_loggers=("app.services.llm_chat", "app.services.llm_tools"),
+        )
+        root_logger = logging.getLogger()
+        root_logger.addHandler(handler)
+        handler.start()
+        llm_logger = logging.getLogger("app.services.llm_chat")
+        tool_logger = logging.getLogger("app.services.llm_tools")
+        other_logger = logging.getLogger("app.services.screen_reports")
+        for logger in (llm_logger, tool_logger, other_logger):
+            logger.setLevel(logging.INFO)
+        llm_logger.info("LLM 会话结束 session=group:555")
+        tool_logger.info("LLM 工具调用 tool=web_search")
+        other_logger.info("not captured")
+        llm_logger.warning("LLM 请求失败")
+        handler.stop()
+        root_logger.removeHandler(handler)
+
+        with factory() as db:
+            rows = db.scalars(select(WorkerLog).order_by(WorkerLog.id)).all()
+        assert [row.logger for row in rows] == [
+            "app.services.llm_chat",
+            "app.services.llm_tools",
+            "app.services.llm_chat",
+        ]
+        assert rows[0].message.startswith("LLM 会话结束")
+        assert rows[1].message.startswith("LLM 工具调用")
+    finally:
+        engine.dispose()
+

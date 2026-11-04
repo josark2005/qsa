@@ -9,6 +9,7 @@ import {
   Search,
   Settings,
   Shield,
+  Star,
   Users,
 } from "lucide-react"
 import { NavLink, Outlet, useNavigate } from "react-router-dom"
@@ -89,6 +90,7 @@ export function AppLayout() {
           <SidebarLink to="/" label="概览" icon={LayoutDashboard} />
           <SidebarLink to="/screener" label="选股" icon={Search} />
           <SidebarLink to="/trends" label="走势" icon={Activity} />
+          <SidebarLink to="/watchlist" label="关注" icon={Star} />
           <SidebarLink to="/reports" label="报表历史" icon={History} />
           {isAdmin ? (
             <>
@@ -141,6 +143,7 @@ export function AppLayout() {
           <SidebarLink to="/" label="概览" icon={LayoutDashboard} />
           <SidebarLink to="/screener" label="选股" icon={Search} />
           <SidebarLink to="/trends" label="走势" icon={Activity} />
+          <SidebarLink to="/watchlist" label="关注" icon={Star} />
           <SidebarLink to="/reports" label="报表历史" icon={History} />
           {isAdmin
             ? adminNav.map((item) => <SidebarLink key={item.to} {...item} />)

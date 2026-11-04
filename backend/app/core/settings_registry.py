@@ -692,9 +692,19 @@ SETTING_SPECS: tuple[SettingSpec, ...] = (
         type="str",
         default=(
             "你是 QSA 条件筛选系统的对话助手，用简体中文简洁回答，"
-            "一般不超过 200 字。涉及具体标的的行情、财务或筛选数量时，"
-            "必须先调用工具查询，不要编造数据；回答时注明数据日期。"
-            "不提供买卖建议，只陈述数据与筛选结果。"
+            "一般不超过 200 字。规则："
+            "1. 涉及具体标的的行情、财务、股东、筛选数量、交易日或数据日期时，"
+            "必须先调用工具查询，只依据工具返回的数据作答，禁止编造；"
+            "2. 不确定的日期、星期、是否交易日，一律用 get_market_status 查询，"
+            "不要凭推测回答；"
+            "3. 工具返回错误、超时或没有数据时，直接说明查不到及原因，"
+            "不要用旧数据或想象数据补全；"
+            "4. 回答涉及数据时注明数据日期，并提醒数据可能滞后于最新交易日；"
+            "5. 不使用颜文字、emoji 或夸张语气，保持专业克制；"
+            "6. 任务较复杂（需要多次查询或同时查库和联网搜索）时分阶段回复："
+            "先给出已经查到的部分并说明还在查询，收到全部结果后再给最终结论，"
+            "不要让用户干等；"
+            "7. 不提供买卖建议，只陈述数据与筛选结果。"
         ),
         description="每轮对话都会作为 system 消息发送，用于约束模型语气与行为。",
         multiline=True,
@@ -819,14 +829,49 @@ SETTING_SPECS: tuple[SettingSpec, ...] = (
         label="聊天模式有效期",
         group="llm",
         type="int",
-        default=3600,
+        default=1800,
         minimum=60,
-        maximum=604800,
+        maximum=86400,
         description=(
-            "聊天模式在无新消息后自动关闭的时长，单位秒；"
-            "每次对话都会重新计时，也可发送「关闭聊天模式」立即退出。"
+            "群内 @ 机器人即自动开启聊天模式，此后一段时间内无需再 @；"
+            "超过该时长没有新消息则自动关闭。默认 1800 秒（30 分钟），"
+            "也可发送「关闭聊天模式」立即退出。"
         ),
         order=16,
+    ),
+    SettingSpec(
+        key="llm.memory_enabled",
+        label="启用会话记忆",
+        group="llm",
+        type="bool",
+        default=True,
+        description=(
+            "把较早的对话压缩成记忆摘要存数据库，对话时注入模型，"
+            "避免上下文无限增长；关闭后只用最近若干轮对话。"
+        ),
+        order=21,
+    ),
+    SettingSpec(
+        key="llm.memory_interval_hours",
+        label="记忆整理间隔",
+        group="llm",
+        type="int",
+        default=6,
+        minimum=1,
+        maximum=168,
+        description="每隔多少小时把未整理的对话压缩进记忆摘要。",
+        order=22,
+    ),
+    SettingSpec(
+        key="llm.memory_max_chars",
+        label="记忆长度上限",
+        group="llm",
+        type="int",
+        default=1200,
+        minimum=200,
+        maximum=4000,
+        description="单个会话的记忆摘要最大字数，超过时整理阶段会要求模型压缩。",
+        order=23,
     ),
     SettingSpec(
         key="llm.chat_per_minute",
@@ -849,6 +894,34 @@ SETTING_SPECS: tuple[SettingSpec, ...] = (
         maximum=10000,
         description="单个 QQ 用户每天最多发起的对话请求数。",
         order=18,
+    ),
+    SettingSpec(
+        key="llm.tool_slow_notice_seconds",
+        label="工具慢提醒阈值",
+        group="llm",
+        type="int",
+        default=5,
+        minimum=0,
+        maximum=60,
+        description=(
+            "单次工具调用超过该秒数时，先给对话里的人发一条等待提示；"
+            "0 表示不发送提示。"
+        ),
+        order=19,
+    ),
+    SettingSpec(
+        key="llm.tool_timeout_seconds",
+        label="工具调用超时",
+        group="llm",
+        type="int",
+        default=30,
+        minimum=1,
+        maximum=300,
+        description=(
+            "单次工具调用的最长等待时间，超时后会把错误告知模型和对话用户；"
+            "筛选类工具本身有数据库查询超时，通常无需调大。"
+        ),
+        order=20,
     ),
     SettingSpec(
         key="maintenance.enabled",

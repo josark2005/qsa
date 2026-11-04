@@ -51,9 +51,12 @@ class WorkerLogHandler(logging.Handler):
         flush_interval: float = WORKER_LOG_FLUSH_INTERVAL,
         batch_size: int = WORKER_LOG_FLUSH_BATCH,
         queue_size: int = WORKER_LOG_QUEUE_SIZE,
+        only_loggers: tuple[str, ...] | None = None,
     ) -> None:
         super().__init__()
         self._session_factory = session_factory
+        # 非空时只捕获这些 logger（含子 logger），用于 API 进程只落 LLM 日志。
+        self._only_loggers = tuple(only_loggers or ())
         self._max_rows = max(1, int(max_rows))
         self._keep_days = max(1, int(keep_days))
         self._flush_interval = max(0.05, float(flush_interval))
@@ -87,12 +90,16 @@ class WorkerLogHandler(logging.Handler):
         logging.getLogger().removeHandler(self)
         self._thread = None
 
-    @staticmethod
-    def _should_capture(record: logging.LogRecord) -> bool:
+    def _should_capture(self, record: logging.LogRecord) -> bool:
         if record.name.startswith("app.services.worker_logs"):
             return False
         if record.levelno < logging.INFO:
             return False
+        if self._only_loggers:
+            return any(
+                record.name == name or record.name.startswith(f"{name}.")
+                for name in self._only_loggers
+            )
         return record.name.startswith("app") or record.levelno >= logging.WARNING
 
     def emit(self, record: logging.LogRecord) -> None:
@@ -179,6 +186,23 @@ class WorkerLogHandler(logging.Handler):
 def install_worker_log_handler(session_factory) -> WorkerLogHandler:
     """安装并启动 worker 日志处理器；仅 worker main() 调用（pytest 保持安静）。"""
     handler = WorkerLogHandler(session_factory)
+    logging.getLogger().addHandler(handler)
+    handler.start()
+    return handler
+
+
+# API 进程里产生、需要落库到「运行日志」的 logger：LLM 对话与工具调用。
+LLM_LOG_LOGGERS = ("app.services.llm_chat", "app.services.llm_tools")
+
+
+def install_llm_log_handler(session_factory) -> WorkerLogHandler:
+    """安装只捕获 LLM 对话 / 工具调用日志的处理器（API 进程调用）。
+
+    与 worker 的处理器共用 worker_logs 表与保留策略，但只收 LLM 相关
+    日志，避免把 API 的全部 INFO 日志都写进库。
+    """
+
+    handler = WorkerLogHandler(session_factory, only_loggers=LLM_LOG_LOGGERS)
     logging.getLogger().addHandler(handler)
     handler.start()
     return handler

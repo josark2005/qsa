@@ -2,8 +2,14 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from datetime import datetime
+from typing import TYPE_CHECKING, Any, Callable
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -24,12 +30,26 @@ SILENT_INSTRUCTION = (
     "与条件筛选或数据无关且不需要你的内容，只输出 "
     f"{SILENT_TOKEN}，不要输出任何其它文字。"
 )
+# 每次对话都会注入的运行时上下文（当前日期、星期、数据时效要求）。
+WEEKDAY_LABELS = ("一", "二", "三", "四", "五", "六", "日")
 DEFAULT_TTL_SECONDS = 3600
 MIN_TTL_SECONDS = 60
 ERROR_TTL_SECONDS = 3600
 ERROR_TEXT_LIMIT = 500
 TOOL_CONTENT_LIMIT = 4000
 REASON_LIMIT = 200
+# 每日 token 用量的 redis 计数键前缀与保留时间。
+USAGE_KEY_PREFIX = "qsa:llm:usage:"
+USAGE_TTL_SECONDS = 40 * 86400
+USAGE_FIELDS = (
+    "requests",
+    "prompt_tokens",
+    "completion_tokens",
+    "cached_tokens",
+    "total_tokens",
+    "tool_calls",
+)
+SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 # 工具层由并行分支提供；缺失时降级为“无工具”，避免导入期直接崩溃。
 # 单元测试会 monkeypatch 本模块的 run_tool / tool_definitions 两个名字。
@@ -71,10 +91,34 @@ class LLMSettings:
     web_search_enabled: bool
     web_search_base_url: str
     chat_mode_ttl_seconds: int
+    tool_slow_notice_seconds: int
+    tool_timeout_seconds: int
 
     @property
     def configured(self) -> bool:
         return bool(self.base_url) and bool(self.model)
+
+
+@dataclass
+class UsageCounter:
+    """一轮对话累计的模型用量，用于结构化日志与每日 token 计数。"""
+
+    requests: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cached_tokens: int = 0
+    total_tokens: int = 0
+    tool_calls: int = 0
+
+    def add_call(self, tokens: dict[str, int]) -> None:
+        self.requests += 1
+        self.prompt_tokens += int(tokens.get("prompt_tokens") or 0)
+        self.completion_tokens += int(tokens.get("completion_tokens") or 0)
+        self.cached_tokens += int(tokens.get("cached_tokens") or 0)
+        self.total_tokens += int(tokens.get("total_tokens") or 0)
+
+    def as_dict(self) -> dict[str, int]:
+        return {name: int(getattr(self, name)) for name in USAGE_FIELDS}
 
 
 # 与 app/core/settings_registry.py 的默认值保持一致；旧库/测试快照可能缺键。
@@ -99,7 +143,12 @@ _FALLBACK_DEFAULTS: dict[str, Any] = {
     "llm.web_search_base_url": "",
     "llm.web_search_language": "",
     "llm.web_search_timeout_seconds": 15,
-    "llm.chat_mode_ttl_seconds": 3600,
+    "llm.chat_mode_ttl_seconds": 1800,
+    "llm.tool_slow_notice_seconds": 5,
+    "llm.tool_timeout_seconds": 30,
+    "llm.memory_enabled": True,
+    "llm.memory_interval_hours": 6,
+    "llm.memory_max_chars": 1200,
 }
 
 
@@ -220,6 +269,18 @@ def llm_settings(snapshot: SettingsSnapshot | Any) -> LLMSettings:
             minimum=0,
             maximum=604800,
         ),
+        tool_slow_notice_seconds=_as_int(
+            _raw(snapshot, "llm.tool_slow_notice_seconds"),
+            5,
+            minimum=0,
+            maximum=60,
+        ),
+        tool_timeout_seconds=_as_int(
+            _raw(snapshot, "llm.tool_timeout_seconds"),
+            30,
+            minimum=1,
+            maximum=300,
+        ),
     )
 
 
@@ -254,6 +315,96 @@ def _response_text(response: Any) -> str:
         return json.dumps(response.json(), ensure_ascii=False)
     except Exception:
         return ""
+
+
+def _count(value: Any) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def extract_usage(payload: Any) -> dict[str, int]:
+    """从 OpenAI 兼容响应的 usage 字段提取 token 计数。
+
+    缓存 token 的字段名各家不同：OpenAI 用 prompt_tokens_details.cached_tokens，
+    DeepSeek 用 prompt_cache_hit_tokens，Anthropic 兼容层用 cache_read_input_tokens，
+    这里都按“命中缓存的输入 token”统一统计。
+    """
+
+    usage = payload.get("usage") if isinstance(payload, dict) else None
+    if not isinstance(usage, dict):
+        usage = {}
+    prompt_raw = usage.get("prompt_tokens")
+    if prompt_raw is None:
+        prompt_raw = usage.get("input_tokens")
+    completion_raw = usage.get("completion_tokens")
+    if completion_raw is None:
+        completion_raw = usage.get("output_tokens")
+    prompt_tokens = _count(prompt_raw)
+    completion_tokens = _count(completion_raw)
+    details = usage.get("prompt_tokens_details")
+    if not isinstance(details, dict):
+        details = usage.get("input_tokens_details")
+    cached_tokens = 0
+    if isinstance(details, dict):
+        cached_tokens = _count(details.get("cached_tokens")) or _count(
+            details.get("cache_read")
+        )
+    if not cached_tokens:
+        cached_tokens = _count(usage.get("prompt_cache_hit_tokens")) or _count(
+            usage.get("cache_read_input_tokens")
+        )
+    total_tokens = _count(usage.get("total_tokens")) or (
+        prompt_tokens + completion_tokens
+    )
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "cached_tokens": cached_tokens,
+        "total_tokens": total_tokens,
+    }
+
+
+def _usage_key(day: datetime | None = None) -> str:
+    moment = day or datetime.now(SHANGHAI)
+    return f"{USAGE_KEY_PREFIX}{moment:%Y%m%d}"
+
+
+def record_usage(redis_client: Any, usage: UsageCounter) -> None:
+    """把本轮对话的 token 用量累加到当天的 redis 哈希；失败只打日志。"""
+
+    if redis_client is None or usage.requests <= 0:
+        return
+    key = _usage_key()
+    try:
+        for name, value in usage.as_dict().items():
+            if value:
+                redis_client.hincrby(key, name, int(value))
+        redis_client.expire(key, USAGE_TTL_SECONDS)
+    except Exception as exc:  # pragma: no cover - redis 异常不影响对话
+        logger.warning("记录 LLM token 用量失败：%s", exc)
+
+
+def usage_snapshot(
+    redis_client: Any, *, day: datetime | None = None
+) -> dict[str, Any]:
+    """读取某天的 token 用量计数（默认今天，时区 Asia/Shanghai）。"""
+
+    moment = day or datetime.now(SHANGHAI)
+    snapshot: dict[str, Any] = {"date": f"{moment:%Y-%m-%d}"}
+    snapshot.update({name: 0 for name in USAGE_FIELDS})
+    if redis_client is None:
+        return snapshot
+    try:
+        raw = redis_client.hgetall(_usage_key(moment))
+    except Exception as exc:  # pragma: no cover
+        logger.warning("读取 LLM token 用量失败：%s", exc)
+        return snapshot
+    for name in USAGE_FIELDS:
+        if isinstance(raw, dict) and name in raw:
+            snapshot[name] = _count(raw[name])
+    return snapshot
 
 
 def _record_error(redis_client: Any, message: str) -> None:
@@ -366,11 +517,25 @@ def complete_chat(
     *,
     tools: list[dict[str, Any]] | None = None,
     http: Any | None = None,
+    usage: UsageCounter | None = None,
 ) -> dict[str, Any]:
-    """POST {base_url}/chat/completions，返回 choices[0].message 字典。"""
+    """POST {base_url}/chat/completions，返回 choices[0].message 字典。
+
+    传入 usage 时会把本次请求的 token 用量累加进去，并记录结构化日志。
+    """
 
     if not settings.configured:
         raise LLMError("LLM 未配置：请在系统设置中填写接口地址与模型名称")
+
+    started = time.monotonic()
+    input_chars = sum(len(str(item.get("content") or "")) for item in messages)
+    logger.info(
+        "LLM 请求 model=%s messages=%s input_chars=%s tools=%s",
+        settings.model,
+        len(messages),
+        input_chars,
+        len(tools or []),
+    )
 
     url = settings.base_url.rstrip("/") + "/chat/completions"
     headers: dict[str, str] = {"Content-Type": "application/json"}
@@ -432,6 +597,23 @@ def complete_chat(
     if not isinstance(message, dict):
         logger.warning("LLM 返回缺少 message 字段")
         raise LLMError("模型返回缺少 message 字段")
+
+    tokens = extract_usage(payload)
+    latency_ms = int((time.monotonic() - started) * 1000)
+    if usage is not None:
+        usage.add_call(tokens)
+    logger.info(
+        "LLM 响应 model=%s request=%s latency_ms=%s prompt_tokens=%s "
+        "completion_tokens=%s cached_tokens=%s total_tokens=%s tool_calls=%s",
+        settings.model,
+        usage.requests if usage is not None else 1,
+        latency_ms,
+        tokens["prompt_tokens"],
+        tokens["completion_tokens"],
+        tokens["cached_tokens"],
+        tokens["total_tokens"],
+        len(_tool_calls(message)) if isinstance(message, dict) else 0,
+    )
     return message
 
 
@@ -458,11 +640,124 @@ def _parse_arguments(raw: Any) -> dict[str, Any]:
     return {}
 
 
-def _execute_tool_calls(
-    tool_calls: list[dict[str, Any]],
+def _notify(on_notice: Callable[[str], None] | None, text: str) -> None:
+    """向对话里的人发送一条提示；失败只记日志，不影响对话。"""
+
+    if on_notice is None:
+        return
+    try:
+        on_notice(text)
+    except Exception:  # pragma: no cover - 提示发送失败不应中断对话
+        logger.warning("发送 LLM 工具提示失败", exc_info=True)
+
+
+def _tool_error_text(content: str) -> str:
+    """工具返回 {"error": ...} 时取出错误原因，否则返回空串。"""
+
+    text = (content or "").strip()
+    if not text.startswith('{"error"'):
+        return ""
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError):
+        return ""
+    error = payload.get("error") if isinstance(payload, dict) else None
+    return str(error) if error else ""
+
+
+def _call_tool(
+    name: str,
+    arguments: dict[str, Any],
     *,
     snapshot: Any,
     session_factory: Any,
+) -> str:
+    """调用 run_tool；异常统一转成中文错误文本，绝不抛出。"""
+
+    try:
+        return str(
+            run_tool(
+                name,
+                arguments,
+                session_factory=session_factory,
+                snapshot=snapshot,
+            )
+            or ""
+        )
+    except Exception as exc:  # pragma: no cover - run_tool 正常不会抛
+        logger.warning(
+            "LLM 工具 %s 执行失败：%s: %s", name, type(exc).__name__, exc
+        )
+        return json.dumps(
+            {"error": f"工具执行失败：{type(exc).__name__}: {exc}"},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+
+def _run_tool_with_timeout(
+    name: str,
+    arguments: dict[str, Any],
+    *,
+    settings: LLMSettings,
+    snapshot: Any,
+    session_factory: Any,
+    on_notice: Callable[[str], None] | None,
+) -> str:
+    """在线程里执行工具，支持慢提示与超时；超时后把错误交给模型。"""
+
+    timeout = max(1, int(settings.tool_timeout_seconds))
+    notice_after = max(0, int(settings.tool_slow_notice_seconds))
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="llm-tool")
+    future = executor.submit(
+        _call_tool,
+        name,
+        arguments,
+        snapshot=snapshot,
+        session_factory=session_factory,
+    )
+    timer: threading.Timer | None = None
+    if notice_after > 0:
+        timer = threading.Timer(
+            notice_after,
+            _notify,
+            args=(
+                on_notice,
+                f"「{name}」查询有点慢，正在继续处理，请稍等…",
+            ),
+        )
+        timer.daemon = True
+        timer.start()
+    try:
+        content = future.result(timeout=timeout)
+    except FutureTimeoutError:
+        logger.warning("LLM 工具 %s 执行超时（%s 秒）", name, timeout)
+        _notify(
+            on_notice,
+            f"「{name}」查询超时（超过 {timeout} 秒），已中止，请稍后再试。",
+        )
+        return (
+            f"工具执行超时：超过 {timeout} 秒未返回结果，"
+            "请稍后重试或改用其它工具。"
+        )
+    finally:
+        if timer is not None:
+            timer.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+    error = _tool_error_text(content)
+    if error:
+        logger.warning("LLM 工具 %s 返回错误：%s", name, error)
+        _notify(on_notice, f"「{name}」查询失败：{_clip(error, 120)}")
+    return content
+
+
+def _execute_tool_calls(
+    tool_calls: list[dict[str, Any]],
+    *,
+    settings: LLMSettings,
+    snapshot: Any,
+    session_factory: Any,
+    on_notice: Callable[[str], None] | None = None,
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     for call in tool_calls:
@@ -470,19 +765,14 @@ def _execute_tool_calls(
         function = call.get("function") or {}
         name = str(function.get("name") or "")
         arguments = _parse_arguments(function.get("arguments"))
-        try:
-            output = run_tool(
-                name,
-                arguments,
-                session_factory=session_factory,
-                snapshot=snapshot,
-            )
-            content = str(output or "")
-        except Exception as exc:
-            logger.warning(
-                "LLM 工具 %s 执行失败：%s: %s", name, type(exc).__name__, exc
-            )
-            content = f"工具执行失败：{type(exc).__name__}: {exc}"
+        content = _run_tool_with_timeout(
+            name,
+            arguments,
+            settings=settings,
+            snapshot=snapshot,
+            session_factory=session_factory,
+            on_notice=on_notice,
+        )
         results.append(
             {
                 "role": "tool",
@@ -501,6 +791,9 @@ def _run_conversation(
     snapshot: Any,
     session_factory: Any,
     http: Any | None,
+    usage: UsageCounter | None = None,
+    on_notice: Callable[[str], None] | None = None,
+    on_progress: Callable[[str], None] | None = None,
 ) -> str:
     rounds = 0
     used_tools: list[str] = []
@@ -510,9 +803,16 @@ def _run_conversation(
             if tools is not None and rounds < settings.max_tool_rounds
             else None
         )
-        message = complete_chat(settings, messages, tools=use_tools, http=http)
+        message = complete_chat(
+            settings, messages, tools=use_tools, http=http, usage=usage
+        )
         messages.append(message)
         tool_calls = _tool_calls(message)
+        if tool_calls:
+            # 阶段性回复：模型在调用工具前先说的话立即发给用户。
+            interim = str(message.get("content") or "").strip()
+            if interim and interim.upper() != SILENT_TOKEN:
+                _notify(on_progress, interim)
         if not tool_calls:
             if rounds:
                 logger.info(
@@ -528,7 +828,9 @@ def _run_conversation(
                 "LLM 工具调用轮数已达上限 %s，改为直接回答", settings.max_tool_rounds
             )
             messages.pop()
-            final = complete_chat(settings, messages, tools=None, http=http)
+            final = complete_chat(
+                settings, messages, tools=None, http=http, usage=usage
+            )
             messages.append(final)
             return str(final.get("content") or "")
 
@@ -537,12 +839,75 @@ def _run_conversation(
             str((call.get("function") or {}).get("name") or "") for call in tool_calls
         ]
         used_tools.extend(name for name in names if name)
-        logger.info("LLM 工具调用第 %s 轮：%s", rounds, ", ".join(names) or "-")
+        if usage is not None:
+            usage.tool_calls += len(names)
+        logger.info(
+            "LLM 工具调用第 %s 轮 tools=%s count=%s",
+            rounds,
+            ", ".join(names) or "-",
+            len(names),
+        )
         messages.extend(
             _execute_tool_calls(
-                tool_calls, snapshot=snapshot, session_factory=session_factory
+                tool_calls,
+                settings=settings,
+                snapshot=snapshot,
+                session_factory=session_factory,
+                on_notice=on_notice,
             )
         )
+
+
+def _load_memory(
+    session_factory: Any,
+    redis_client: Any,
+    session_key: str,
+) -> str:
+    """读取会话记忆摘要；记忆模块不可用或有异常时按无记忆处理。"""
+
+    try:
+        from app.services import llm_memory
+
+        return str(
+            llm_memory.load_memory(
+                session_factory=session_factory,
+                redis_client=redis_client,
+                session_key=session_key,
+            )
+            or ""
+        )
+    except Exception:  # pragma: no cover - 记忆失败不应影响对话
+        logger.warning("加载 LLM 记忆失败", exc_info=True)
+        return ""
+
+
+def _remember_exchange(
+    session_factory: Any,
+    redis_client: Any,
+    snapshot: Any,
+    session_key: str,
+    user_text: str,
+    assistant_text: str,
+) -> None:
+    """把本轮问答记入待整理缓冲，并在到期时触发后台记忆整理。"""
+
+    try:
+        from app.services import llm_memory
+
+        llm_memory.record_exchange(
+            redis_client=redis_client,
+            session_key=session_key,
+            user_text=user_text,
+            assistant_text=assistant_text,
+        )
+        llm_memory.maybe_summarize(
+            session_factory=session_factory,
+            redis_client=redis_client,
+            snapshot=snapshot,
+            session_key=session_key,
+        )
+    except Exception:  # pragma: no cover - 记忆失败不应影响对话
+        logger.warning("记录 LLM 记忆失败", exc_info=True)
 
 
 def chat_reply(
@@ -555,11 +920,15 @@ def chat_reply(
     speaker: str = "",
     silent_allowed: bool = False,
     http: Any | None = None,
+    on_notice: Callable[[str], None] | None = None,
+    on_progress: Callable[[str], None] | None = None,
 ) -> str:
     """组装上下文、执行工具循环并返回纯文本回复；失败抛 LLMError。
 
     silent_allowed=True 用于群里没有 @ 机器人的普通消息：模型可以用
     SILENT_TOKEN 表示“不需要回应”，此时返回空字符串。
+    on_notice 用于工具执行过慢/失败/超时时向对话里的人发送提示；
+    on_progress 用于阶段性回复：模型在调用工具前先给出的说明会立即发出。
     """
 
     settings = llm_settings(snapshot)
@@ -568,6 +937,8 @@ def chat_reply(
     if not settings.configured:
         raise LLMError("LLM 未配置：请在系统设置中填写接口地址与模型名称")
 
+    started = time.monotonic()
+    usage = UsageCounter()
     prompt = str(text or "").strip()
     # 历史轮数为 0 时既不携带历史，也顺手清理旧 key。
     history = (
@@ -577,6 +948,21 @@ def chat_reply(
     messages: list[dict[str, Any]] = []
     if settings.system_prompt:
         messages.append({"role": "system", "content": settings.system_prompt})
+    # 运行时上下文（当前日期/星期）每轮注入，避免模型自行推测日期。
+    messages.append({"role": "system", "content": runtime_context()})
+    memory_enabled = _as_bool(_raw(snapshot, "llm.memory_enabled"))
+    if memory_enabled and session_factory is not None:
+        memory_text = _load_memory(session_factory, redis_client, session_key)
+        if memory_text:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "以下是该会话此前的记忆摘要，仅作背景参考；"
+                        f"涉及数据与日期时仍以工具查询结果为准：\n{memory_text}"
+                    ),
+                }
+            )
     if silent_allowed:
         messages.append({"role": "system", "content": SILENT_INSTRUCTION})
     messages.extend(history)
@@ -601,8 +987,12 @@ def chat_reply(
             snapshot=snapshot,
             session_factory=session_factory,
             http=http,
+            usage=usage,
+            on_notice=on_notice,
+            on_progress=on_progress,
         )
     except LLMError as exc:
+        _finish_usage(settings, session_key, usage, started, redis_client, ok=False)
         _record_error(redis_client, str(exc))
         raise
     except Exception as exc:  # pragma: no cover - 兜底，避免裸异常冒泡到机器人
@@ -610,6 +1000,7 @@ def chat_reply(
             f"{type(exc).__name__}: {exc}", settings.api_key, limit=REASON_LIMIT
         )
         logger.warning("LLM 对话异常：%s", reason)
+        _finish_usage(settings, session_key, usage, started, redis_client, ok=False)
         _record_error(redis_client, reason)
         raise LLMError(f"模型调用失败：{reason}") from exc
 
@@ -617,7 +1008,16 @@ def chat_reply(
     reply = str(answer or "").strip()
     if silent_allowed and _is_silent(reply):
         # 群聊里模型主动选择不回应：不发送消息，也不写入上下文。
-        logger.info("LLM 判断无需回应，已跳过该条群消息")
+        _finish_usage(
+            settings,
+            session_key,
+            usage,
+            started,
+            redis_client,
+            ok=True,
+            reply_chars=0,
+            silent=True,
+        )
         return ""
     reply = reply or EMPTY_REPLY
     _save_history(
@@ -630,4 +1030,72 @@ def chat_reply(
         ],
         settings,
     )
+    _finish_usage(
+        settings,
+        session_key,
+        usage,
+        started,
+        redis_client,
+        ok=True,
+        reply_chars=len(reply),
+    )
+    if memory_enabled and session_factory is not None:
+        _remember_exchange(
+            session_factory,
+            redis_client,
+            snapshot,
+            session_key,
+            user_content,
+            reply,
+        )
     return reply
+
+
+def runtime_context(now: datetime | None = None) -> str:
+    """当前时间与日期口径说明，避免模型自行猜测星期或交易日。"""
+
+    moment = now or datetime.now(SHANGHAI)
+    weekday = WEEKDAY_LABELS[moment.weekday()]
+    return (
+        f"当前时间：{moment:%Y-%m-%d %H:%M}（Asia/Shanghai，星期{weekday}）。"
+        "回答今天、星期几、最近交易日或数据是否最新时，以本时间与 "
+        "get_market_status 工具的返回为准，不要凭推测回答；"
+        "数据库行情可能滞后，回答时说明数据日期。"
+        "回答保持简洁专业，不使用颜文字或 emoji；"
+        "任务较复杂时先回复已经查到的部分并说明还在查询，完成后再给最终结论；"
+        "工具报错、超时或没有数据时如实说明原因，不要编造。"
+    )
+
+
+def _finish_usage(
+    settings: LLMSettings,
+    session_key: str,
+    usage: UsageCounter,
+    started: float,
+    redis_client: Any,
+    *,
+    ok: bool,
+    reply_chars: int = 0,
+    silent: bool = False,
+) -> None:
+    """记录一轮对话的汇总日志（会话 / 用量 / 耗时）并累加每日 token 计数。"""
+
+    duration_ms = int((time.monotonic() - started) * 1000)
+    logger.info(
+        "LLM 会话结束 session=%s model=%s ok=%s requests=%s tool_calls=%s "
+        "prompt_tokens=%s completion_tokens=%s cached_tokens=%s total_tokens=%s "
+        "reply_chars=%s silent=%s duration_ms=%s",
+        session_key,
+        settings.model,
+        ok,
+        usage.requests,
+        usage.tool_calls,
+        usage.prompt_tokens,
+        usage.completion_tokens,
+        usage.cached_tokens,
+        usage.total_tokens,
+        reply_chars,
+        silent,
+        duration_ms,
+    )
+    record_usage(redis_client, usage)

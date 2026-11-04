@@ -125,6 +125,30 @@ def set_chat_mode(
     return state
 
 
+def ensure_chat_mode(
+    redis_client: Any,
+    group_id: str,
+    *,
+    ttl_seconds: int = 1800,
+    enabled_by: str = "",
+    group_name: str | None = None,
+) -> dict[str, Any]:
+    """群里 @ 机器人即开启聊天模式；已开启时只续期，不覆盖原开启人/群名。"""
+
+    state = get_chat_mode(redis_client, group_id)
+    if state is None:
+        return set_chat_mode(
+            redis_client,
+            group_id,
+            mode=MODE_MENTION,
+            enabled_by=enabled_by,
+            group_name=group_name,
+            ttl_seconds=ttl_seconds,
+        )
+    touch_chat_mode(redis_client, group_id, ttl_seconds=ttl_seconds)
+    return state
+
+
 def touch_chat_mode(redis_client: Any, group_id: str, *, ttl_seconds: int) -> None:
     """对话活跃时续期，避免长时间聊天中途过期。"""
 

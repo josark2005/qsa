@@ -523,6 +523,35 @@ def run_weekly_pipeline(
     return results
 
 
+def _notify_watch_safely(
+    db: Session,
+    settings_service: Any,
+    redis_client: Any,
+    target_date: date,
+) -> None:
+    """财报/股东户数同步后推送关注标的公告；任何失败只记日志。"""
+
+    if settings_service is None or redis_client is None:
+        return
+    try:
+        from app.services.watch_notify import notify_watch_announcements
+
+        result = notify_watch_announcements(
+            db,
+            settings=settings_service,
+            redis_client=redis_client,
+            target_date=target_date,
+        )
+        if result.get("notified"):
+            logger.info(
+                "watch announcements notified: %s items -> %s groups",
+                result.get("items"),
+                result.get("groups"),
+            )
+    except Exception:
+        logger.exception("watch announcement notification failed")
+
+
 def run_pipeline(
     name: str,
     *,
@@ -592,7 +621,7 @@ def run_pipeline(
                     limit=limit,
                 )
             if name == "financial":
-                return run_financial_pipeline(
+                result = run_financial_pipeline(
                     db,
                     session_factory,
                     target_date=current_target,
@@ -600,8 +629,12 @@ def run_pipeline(
                     period_count=2,
                     pipeline="financial",
                 )
+                _notify_watch_safely(
+                    db, settings_service, redis_client, current_target
+                )
+                return result
             if name == "financial_morning":
-                return run_financial_pipeline(
+                result = run_financial_pipeline(
                     db,
                     session_factory,
                     target_date=current_target,
@@ -609,6 +642,10 @@ def run_pipeline(
                     period_count=2,
                     pipeline="financial_morning",
                 )
+                _notify_watch_safely(
+                    db, settings_service, redis_client, current_target
+                )
+                return result
             return run_weekly_pipeline(
                 db, session_factory, target_date=current_target, trigger=trigger
             )

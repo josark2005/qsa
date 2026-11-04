@@ -26,6 +26,7 @@ from app.api.routes import (
     qq_bot,
     reports,
     screen,
+    watchlist,
 )
 from app.core.config import AppConfig, get_config
 from app.core.container import Container
@@ -39,6 +40,7 @@ from app.qq_bot.websocket_client import QQBotWebSocket
 from app.services.history_archive import auto_import_history
 from app.services.login_limiter import LoginLimiter
 from app.services.sessions import SessionService
+from app.services.worker_logs import install_llm_log_handler
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +96,15 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             settings_watcher=watcher,
         )
         app.state.container = container
+        # API 进程也要把 LLM 对话 / 工具调用日志落库，管理端「运行日志」可见；
+        # 测试环境不装处理器，避免后台线程干扰 pytest。
+        llm_log_handler = None
+        if config.app_env != "test":
+            try:
+                llm_log_handler = install_llm_log_handler(session_factory)
+            except Exception:
+                logger.exception("failed to install LLM log handler")
+        app.state.llm_log_handler = llm_log_handler
         qq_socket = QQBotWebSocket(
             session_factory=session_factory,
             settings=settings_service,
@@ -130,6 +141,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             with contextlib.suppress(BaseException):
                 await personal_qq_task
             watcher.stop()
+            if llm_log_handler is not None:
+                llm_log_handler.stop()
             try:
                 redis_client.close()
             except Exception:
@@ -160,6 +173,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.include_router(admin_sync.router, prefix=config.api_prefix)
     app.include_router(admin_personal_qq.router, prefix=config.api_prefix)
     app.include_router(screen.router, prefix=config.api_prefix)
+    app.include_router(watchlist.router, prefix=config.api_prefix)
     app.include_router(instruments.router, prefix=config.api_prefix)
     app.include_router(reports.router, prefix=config.api_prefix)
     app.include_router(reports.public_router, prefix=config.api_prefix)

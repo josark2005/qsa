@@ -19,6 +19,7 @@ import { ScreenerPage } from "@/pages/ScreenerPage"
 import { SettingsPage } from "@/pages/SettingsPage"
 import { TrendsPage } from "@/pages/TrendsPage"
 import { UsersPage } from "@/pages/UsersPage"
+import { WatchlistPage } from "@/pages/WatchlistPage"
 
 function NotFoundPage() {
   return (
@@ -48,6 +49,7 @@ function App() {
           <Route index element={<DashboardPage />} />
           <Route path="screener" element={<ScreenerPage />} />
           <Route path="trends" element={<TrendsPage />} />
+          <Route path="watchlist" element={<WatchlistPage />} />
           <Route path="reports" element={<ReportsPage />} />
           <Route
             path="admin/data"

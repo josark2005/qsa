@@ -34,6 +34,7 @@ from app.services.qq_chat_mode import (
     MODE_MENTION,
     ChatModeError,
     disable_chat_mode,
+    ensure_chat_mode,
     get_chat_mode,
     match_chat_command,
     set_chat_mode,
@@ -382,9 +383,10 @@ def _help_text(
     chat_hint = ""
     if chat_available:
         chat_hint = (
-            "\n\n群内 @ 机器人发送「开启聊天模式」后，本群消息会交给模型"
-            "判断是否需要回应（不必每条都 @），@ 机器人仍可继续使用"
-            "「筛选」等指令；发送「关闭聊天模式」退出。私聊可以直接提问。"
+            "\n\n群里 @ 机器人即自动开启聊天模式，之后一段时间内不必每条都 @，"
+            "模型会判断是否需要回应；需要选股时仍可 @ 机器人发送「筛选」等指令。"
+            "长时间没有消息会自动关闭，发送「关闭聊天模式」可立即退出。"
+            "私聊可以直接提问。"
         )
     return (
         "QSA 选股助手\n"
@@ -519,10 +521,11 @@ def _quota_allowed(
 
 
 CHAT_MODE_ON_HINT = (
-    "已开启聊天模式。本群消息会交给模型判断是否需要回应，不必每条都 @；"
-    "需要选股时仍可 @ 机器人发送「筛选」等指令。"
-    "发送「关闭聊天模式」退出。"
+    "已开启聊天模式。接下来一段时间内本群消息会交给模型判断是否需要回应，"
+    "不必每条都 @；需要选股时仍可 @ 机器人发送「筛选」等指令。"
+    "长时间没有消息会自动关闭，也可以发送「关闭聊天模式」立即退出。"
 )
+CHAT_MODE_AUTO_PREFIX = "已自动开启聊天模式（@ 机器人即开启）："
 CHAT_MODE_OFF_HINT = (
     "已关闭聊天模式。@ 机器人 发送「筛选」仍可继续使用条件筛选功能。"
 )
@@ -709,6 +712,18 @@ def _chat_mode_reply(
         return CHAT_MODE_OFF_HINT
     if not chat_settings.enabled or not chat_settings.configured:
         return CHAT_MODE_UNCONFIGURED_HINT
+    if action == "on":
+        # 现在 @ 机器人已自动开启，这条指令只做一次确认提示并续期。
+        try:
+            ensure_chat_mode(
+                redis_client,
+                target.openid,
+                ttl_seconds=chat_settings.chat_mode_ttl_seconds,
+                enabled_by=target.actor_openid or "",
+            )
+        except ChatModeError as exc:
+            logger.warning("failed to ensure chat mode: %s", exc)
+        return CHAT_MODE_ON_HINT
     group_name = None
     try:
         info = client.group_info(target.openid)
@@ -770,6 +785,7 @@ def _answer_with_llm(
     *,
     text: str,
     target: ChatTarget,
+    client: Any,
     session_factory: sessionmaker,
     settings: SettingsService,
     redis_client: Any,
@@ -789,6 +805,10 @@ def _answer_with_llm(
         speaker = f"群友{target.actor_openid or ''}".strip()
     else:
         speaker = "用户"
+    def on_notice(notice: str) -> None:
+        # 工具慢/失败/超时提示：直接发一条短消息，模型随后仍会给出回复。
+        client.send_text(target, notice)
+
     try:
         reply = chat_reply(
             snapshot=snapshot,
@@ -798,6 +818,8 @@ def _answer_with_llm(
             text=text,
             speaker=speaker,
             silent_allowed=not addressed,
+            on_notice=on_notice,
+            on_progress=on_notice,
         )
     except LLMError as exc:
         logger.warning("LLM chat failed: %s", exc)
@@ -853,6 +875,7 @@ def _try_chat_answer(
     reply = _answer_with_llm(
         text=text,
         target=target,
+        client=client,
         session_factory=session_factory,
         settings=settings,
         redis_client=redis_client,
@@ -989,7 +1012,7 @@ def handle_message(
 
     try:
         if target.kind == "group" and not addressed:
-            # 群里没有 @ 机器人的普通消息：只有开启聊天模式才交给模型判断
+            # 群里没有 @ 机器人的普通消息：只有聊天模式生效时才交给模型判断
             # 是否需要回应，未开启时直接忽略。
             if get_chat_mode(redis_client, target.openid) is not None:
                 _try_chat_answer(
@@ -1002,6 +1025,20 @@ def handle_message(
                     addressed=False,
                 )
             return
+
+        if is_onebot and target.kind == "group" and _chat_available(settings):
+            # 只要有人 @ 机器人，就自动开启（或续期）群聊天模式。
+            try:
+                ensure_chat_mode(
+                    redis_client,
+                    target.openid,
+                    ttl_seconds=llm_settings(
+                        settings.snapshot
+                    ).chat_mode_ttl_seconds,
+                    enabled_by=target.actor_openid or "",
+                )
+            except ChatModeError as exc:
+                logger.warning("failed to auto enable chat mode: %s", exc)
 
         command = match_chat_command(text)
         if command is not None:

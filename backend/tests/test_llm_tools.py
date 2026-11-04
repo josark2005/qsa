@@ -1,20 +1,29 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import date
 
 import pytest
+from sqlalchemy import select
 
 from app.core.settings_service import SettingsSnapshot
 from app.models.daily_bar import DailyBar
 from app.models.financial_report import FinancialReport
 from app.models.instrument import Instrument
+from app.models.limit_event import LimitEvent
 from app.models.shareholder_count import ShareholderCount
 from app.models.trading_calendar import TradingCalendar
 from app.services import llm_tools
 from app.services.llm_tools import run_tool, tool_definitions
 
 DB_TOOL_NAMES = [
+    "list_watch_instruments",
+    "add_watch_instrument",
+    "remove_watch_instrument",
+    "get_market_status",
+    "get_market_overview",
+    "get_top_movers",
     "search_instruments",
     "get_instrument_profile",
     "get_price_history",
@@ -575,3 +584,273 @@ def test_ambiguous_and_unknown_symbol(
     )
     assert "error" in unknown
     assert "未找到标的" in unknown["error"]
+
+
+# ---------------------------------------------------------------------------
+# 工具调用日志
+# ---------------------------------------------------------------------------
+def test_run_tool_logs_success(app_fixture, container, snapshot, caplog) -> None:
+    caplog.set_level(logging.INFO, logger="app.services.llm_tools")
+    run_tool(
+        "list_screening_factors",
+        {},
+        session_factory=container.session_factory,
+        snapshot=snapshot,
+    )
+    assert "LLM 工具调用 tool=list_screening_factors status=ok" in caplog.text
+    assert "duration_ms=" in caplog.text
+    assert "result_chars=" in caplog.text
+
+
+def test_run_tool_logs_error_status(app_fixture, container, snapshot, caplog) -> None:
+    caplog.set_level(logging.INFO, logger="app.services.llm_tools")
+    text = run_tool(
+        "not_a_tool",
+        {},
+        session_factory=container.session_factory,
+        snapshot=snapshot,
+    )
+    assert "error" in json.loads(text)
+    assert "tool=not_a_tool status=error" in caplog.text
+
+
+
+# ---------------------------------------------------------------------------
+# 基础市场工具
+# ---------------------------------------------------------------------------
+def _add_calendar(container, *days, exchange: str = "CN") -> None:
+    with container.session_factory() as db:
+        for cal_date, is_open in days:
+            db.add(
+                TradingCalendar(
+                    exchange=exchange,
+                    cal_date=cal_date,
+                    is_open=is_open,
+                    source="test",
+                )
+            )
+        db.commit()
+
+
+def test_market_status_reports_dates(app_fixture, container, snapshot) -> None:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    _seed(container)
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    _add_calendar(container, (today, True))
+    payload = json.loads(
+        run_tool(
+            "get_market_status",
+            {},
+            session_factory=container.session_factory,
+            snapshot=snapshot,
+        )
+    )
+    assert payload["latest_bar_date"] == "2024-05-07"
+    assert payload["latest_financial_announce_date"] == "2024-04-30"
+    assert payload["latest_holder_announce_date"] == "2024-04-30"
+    assert payload["is_trading_day"] is True
+    assert payload["latest_trade_date"] == today.isoformat()
+    assert payload["recent_trade_days"][-1] == today.isoformat()
+    assert payload["weekday"] in {
+        "星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"
+    }
+    assert payload["weekday"] == f"星期{'一二三四五六日'[today.weekday()]}"
+
+
+def test_market_status_without_calendar(app_fixture, container, snapshot) -> None:
+    payload = json.loads(
+        run_tool(
+            "get_market_status",
+            {},
+            session_factory=container.session_factory,
+            snapshot=snapshot,
+        )
+    )
+    assert payload["is_trading_day"] is None
+    assert payload["latest_trade_date"] is None
+    assert payload["latest_bar_date"] is None
+
+
+def test_market_overview_counts(app_fixture, container, snapshot) -> None:
+    _seed(container)
+    with container.session_factory() as db:
+        rows = db.execute(select(Instrument.id)).all()
+        ids = [row[0] for row in rows]
+        db.add(
+            LimitEvent(
+                instrument_id=ids[0],
+                trade_date=date(2024, 5, 7),
+                direction="up",
+                is_close_limit=True,
+                is_touched=True,
+                is_one_word=False,
+                source="test",
+            )
+        )
+        db.commit()
+    payload = json.loads(
+        run_tool(
+            "get_market_overview",
+            {},
+            session_factory=container.session_factory,
+            snapshot=snapshot,
+        )
+    )
+    assert payload["date"] == "2024-05-07"
+    assert payload["total"] == 2
+    assert payload["up"] == 2
+    assert payload["down"] == 0
+    assert payload["limit_up"] == 1
+    assert payload["limit_down"] == 0
+    assert payload["avg_pct_chg"] == pytest.approx(6.25)
+    assert payload["total_amount"] == pytest.approx(3500.0)
+
+
+def test_market_overview_without_bars(app_fixture, container, snapshot) -> None:
+    payload = json.loads(
+        run_tool(
+            "get_market_overview",
+            {},
+            session_factory=container.session_factory,
+            snapshot=snapshot,
+        )
+    )
+    assert "没有日线数据" in payload["error"]
+
+
+def test_top_movers_direction_board_and_limit(
+    app_fixture, container, snapshot
+) -> None:
+    _seed(container)
+    up = json.loads(
+        run_tool(
+            "get_top_movers",
+            {"direction": "up", "limit": 1},
+            session_factory=container.session_factory,
+            snapshot=snapshot,
+        )
+    )
+    assert up["date"] == "2024-05-07"
+    assert [item["symbol"] for item in up["items"]] == ["600519.SH"]
+    assert up["items"][0]["pct_chg"] == pytest.approx(10.0)
+
+    down = json.loads(
+        run_tool(
+            "get_top_movers",
+            {"direction": "down"},
+            session_factory=container.session_factory,
+            snapshot=snapshot,
+        )
+    )
+    # 跌幅榜按涨幅升序；两只标的最新一根均为上涨，东野涨幅更小排在前。
+    assert [item["symbol"] for item in down["items"]] == [
+        "600115.SH",
+        "600519.SH",
+    ]
+
+    gem = json.loads(
+        run_tool(
+            "get_top_movers",
+            {"direction": "up", "board": "创业板"},
+            session_factory=container.session_factory,
+            snapshot=snapshot,
+        )
+    )
+    assert gem["items"] == []
+    invalid = json.loads(
+        run_tool(
+            "get_top_movers",
+            {"direction": "sideways"},
+            session_factory=container.session_factory,
+            snapshot=snapshot,
+        )
+    )
+    assert "direction" in invalid["error"]
+
+
+
+# ---------------------------------------------------------------------------
+# 关注标的
+# ---------------------------------------------------------------------------
+def test_watch_tools_add_list_remove(app_fixture, container, snapshot) -> None:
+    _seed(container)
+
+    added = json.loads(
+        run_tool(
+            "add_watch_instrument",
+            {"symbol": "600519", "note": "等三季报"},
+            session_factory=container.session_factory,
+            snapshot=snapshot,
+        )
+    )
+    assert added["ok"] is True
+    assert added["item"]["symbol"] == "600519.SH"
+    assert added["item"]["name"] == "贵州茅台"
+    assert added["item"]["note"] == "等三季报"
+
+    listed = json.loads(
+        run_tool(
+            "list_watch_instruments",
+            {},
+            session_factory=container.session_factory,
+            snapshot=snapshot,
+        )
+    )
+    assert listed["total"] == 1
+    assert listed["items"][0]["code"] == "600519"
+
+    # 重复添加是 upsert：不新增行，备注更新。
+    again = json.loads(
+        run_tool(
+            "add_watch_instrument",
+            {"symbol": "贵州茅台", "note": "已出财报"},
+            session_factory=container.session_factory,
+            snapshot=snapshot,
+        )
+    )
+    assert again["item"]["id"] == added["item"]["id"]
+    assert again["item"]["note"] == "已出财报"
+    listed = json.loads(
+        run_tool(
+            "list_watch_instruments",
+            {},
+            session_factory=container.session_factory,
+            snapshot=snapshot,
+        )
+    )
+    assert listed["total"] == 1
+
+    removed = json.loads(
+        run_tool(
+            "remove_watch_instrument",
+            {"symbol": "600519.SH"},
+            session_factory=container.session_factory,
+            snapshot=snapshot,
+        )
+    )
+    assert removed["removed"] is True
+    empty = json.loads(
+        run_tool(
+            "list_watch_instruments",
+            {},
+            session_factory=container.session_factory,
+            snapshot=snapshot,
+        )
+    )
+    assert empty["total"] == 0
+
+
+def test_watch_tools_invalid_symbol(app_fixture, container, snapshot) -> None:
+    payload = json.loads(
+        run_tool(
+            "add_watch_instrument",
+            {"symbol": "不存在的标的"},
+            session_factory=container.session_factory,
+            snapshot=snapshot,
+        )
+    )
+    assert "error" in payload
+    assert "未找到" in payload["error"]
+

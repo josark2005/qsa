@@ -518,9 +518,9 @@ export function SettingsPage() {
                       )}
                     </CardContent>
                   </Card>
-                  <PersonalQQCard />
                 </>
               ) : null}
+              {group.key === "personal_qq" ? <PersonalQQCard /> : null}
               <Card>
                 <CardHeader>
                   <CardTitle className="text-base">{group.label}</CardTitle>

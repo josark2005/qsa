@@ -530,10 +530,10 @@ export function WorkerLogQueryCard() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Worker 日志</CardTitle>
+        <CardTitle className="text-base">运行日志</CardTitle>
         <CardDescription>
-          后台 worker 与同步任务的运行日志，可按级别、关键词与请求 ID
-          检索；开启自动刷新后每 2 秒追加最新日志。
+          后台 worker、同步任务与 LLM 对话/工具调用的运行日志，可按级别、
+          关键词与请求 ID 检索；开启自动刷新后每 2 秒追加最新日志。
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">

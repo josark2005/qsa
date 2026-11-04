@@ -171,10 +171,12 @@ def test_group_chat_mode_toggles_and_routes_to_llm(app_fixture, monkeypatch) -> 
     assert "已关闭聊天模式" in messages[-1]
     assert chat_mode_enabled(container.redis, "555") is False
 
+    # 关闭后再 @ 机器人：按新规则会自动重新开启并进入模型对话。
     before = len(calls)
     _send_group(app_fixture, "你好", "m5", client)
-    assert len(calls) == before
-    assert "未识别的指令" in messages[-1]
+    assert len(calls) == before + 1
+    assert messages[-1] == "模型回复"
+    assert chat_mode_enabled(container.redis, "555") is True
 
 
 def test_group_chat_mode_requires_configured_llm(app_fixture, monkeypatch) -> None:
@@ -449,4 +451,64 @@ def test_adapter_require_mention_toggle() -> None:
     )
     assert payload is not None
     assert payload["t"] == "GROUP_AT_MESSAGE_CREATE"
+
+
+
+def test_group_mention_auto_enables_chat_mode(app_fixture, monkeypatch) -> None:
+    container = app_fixture.client.app.state.container
+    # 不覆盖 chat_mode_ttl：使用默认值（30 分钟 = 1800 秒）。
+    values = dict(container.settings_service.snapshot.values)
+    values.update(
+        {
+            "personal_qq.enabled": True,
+            "personal_qq.http_url": "http://127.0.0.1:3000",
+            "personal_qq.self_qq": "999",
+            "llm.enabled": True,
+            "llm.base_url": "http://127.0.0.1:1234/v1",
+            "llm.model": "test-model",
+        }
+    )
+    container.settings_service._snapshot = SettingsSnapshot(values, {}, None)
+    assert container.settings_service.snapshot.get_int(
+        "llm.chat_mode_ttl_seconds"
+    ) == 1800
+
+    messages: list[str] = []
+    monkeypatch.setattr(
+        OneBotClient, "send_text", lambda self, target, text: messages.append(text)
+    )
+    monkeypatch.setattr(OneBotClient, "group_info", lambda self, gid: {})
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        conversation,
+        "chat_reply",
+        lambda **kwargs: calls.append(kwargs) or "自动回复",
+    )
+    client = OneBotClient(
+        http_url="http://127.0.0.1:3000", redis_client=container.redis
+    )
+
+    # 任何 @ 机器人的消息都会自动开启聊天模式并续期 30 分钟。
+    _send_group(app_fixture, "在吗", "auto-1", client)
+    state = get_chat_mode(container.redis, "555")
+    assert state is not None
+    assert state["enabled_by"] == "10001"
+    ttl = container.redis.ttl(chat_mode_key("555"))
+    assert 0 < ttl <= 1800
+    assert calls and calls[-1]["text"] == "在吗"
+
+    # 开启后无需 @：普通群消息也会进入模型。
+    _send_group_plain(app_fixture, "今天大盘怎么样", "auto-2", client)
+    assert calls[-1]["text"] == "今天大盘怎么样"
+    assert calls[-1]["silent_allowed"] is True
+
+    # 再来一条 @ 消息：续期且不覆盖开启人。
+    container.redis.expire(chat_mode_key("555"), 60)
+    _send_group(app_fixture, "再问一句", "auto-3", client)
+    assert container.redis.ttl(chat_mode_key("555")) > 60
+
+    # 「关闭聊天模式」仍然可以立即退出。
+    _send_group(app_fixture, "关闭聊天模式", "auto-4", client)
+    assert "已关闭聊天模式" in messages[-1]
+    assert chat_mode_enabled(container.redis, "555") is False
 

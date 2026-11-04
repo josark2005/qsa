@@ -350,6 +350,23 @@ export interface InstrumentSearchResponse {
   items: InstrumentSearchItem[]
 }
 
+export interface WatchItem {
+  id: number
+  symbol: string
+  code: string
+  name: string
+  board: string | null
+  industry: string | null
+  note: string | null
+  active: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface WatchListResponse {
+  items: WatchItem[]
+}
+
 export interface QQGroupSubscription {
   id: number
   group_openid: string
@@ -396,6 +413,17 @@ export interface PersonalQQStatus {
   chat_groups: number
   chat_mode_ttl_seconds: number
   chat_mode_users: PersonalQQChatMode[]
+  llm_usage_today: LLMUsageStats
+}
+
+export interface LLMUsageStats {
+  date: string
+  requests: number
+  prompt_tokens: number
+  completion_tokens: number
+  cached_tokens: number
+  total_tokens: number
+  tool_calls: number
 }
 
 export interface PersonalQQChatMode {

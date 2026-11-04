@@ -30,6 +30,8 @@ import type {
   UserCreateResponse,
   UserListResponse,
   User,
+  WatchItem,
+  WatchListResponse,
   WorkerLogListResponse,
 } from "@/lib/types"
 
@@ -236,6 +238,36 @@ export const api = {
     return request<TechnicalResponse>(
       `/instruments/${encodeURIComponent(symbol)}/technical`,
     )
+  },
+
+  listWatchItems(signal?: AbortSignal): Promise<WatchListResponse> {
+    return request<WatchListResponse>("/watchlist", { signal })
+  },
+
+  addWatchItem(payload: {
+    symbol: string
+    note?: string | null
+  }): Promise<WatchItem> {
+    return request<WatchItem>("/watchlist", {
+      method: "POST",
+      body: payload,
+    })
+  },
+
+  updateWatchItem(
+    id: number,
+    payload: { note?: string | null; active?: boolean },
+  ): Promise<WatchItem> {
+    return request<WatchItem>(`/watchlist/${id}`, {
+      method: "PATCH",
+      body: payload,
+    })
+  },
+
+  removeWatchItem(id: number): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(`/watchlist/${id}`, {
+      method: "DELETE",
+    })
   },
 
   runScreen(payload: ScreenRequest): Promise<ScreenResponse> {

@@ -25,6 +25,7 @@ from app.services.personal_qq import (
 )
 from app.services.report_pdf import build_report_pdf
 from app.services.screen_reports import create_report_snapshot
+from app.services.watch_notify import notify_watch_announcements
 from app.sync.bars import (
     backfill_bse_bars,
     backfill_tencent_bars,
@@ -363,6 +364,24 @@ def run_daily_report_pipeline(
     run_step(
         "shareholders",
         lambda: sync_shareholder_counts(db, periods=["最新", *periods]),
+    )
+    # 关注标的的财报/股东户数公告：同步完成后推送到已订阅的群（失败不影响主流程）。
+    run_step(
+        "watch_notify",
+        lambda: notify_watch_announcements(
+            db,
+            session_factory=session_factory,
+            settings=settings,
+            redis_client=redis_client,
+            config=config,
+            target_date=target_date,
+            official_client=client,
+            official_targets=targets,
+            personal_client=(
+                personal_client if personal_enabled else None
+            ),
+            personal_targets=personal_groups,
+        ),
     )
     run_step(
         "quality_stock",

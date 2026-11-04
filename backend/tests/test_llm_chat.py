@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 from typing import Any
 
 import fakeredis
@@ -383,8 +385,10 @@ def test_history_trimmed_to_turns_and_has_ttl(
     http = FakeHTTP([_final("继续")])
     _call(http, redis_client)
     messages = http.bodies[0]["messages"]
-    assert messages[1] == {"role": "user", "content": "张三：查一下"}
-    assert messages[2]["role"] == "assistant"
+    # 前两条是 system（提示词 + 运行时日期上下文），之后才是历史与当前问题。
+    assert [item["role"] for item in messages[:2]] == ["system", "system"]
+    assert messages[2] == {"role": "user", "content": "张三：查一下"}
+    assert messages[3]["role"] == "assistant"
 
 
 def test_history_disabled_clears_key(
@@ -538,4 +542,387 @@ def test_chat_reply_silent_disabled_always_answers(redis_client, tool_calls) -> 
     )
     assert reply == "#SILENT#"
     assert redis_client.get(HISTORY_KEY) is not None
+
+
+
+# -- token 用量与日志 -------------------------------------------------------
+def _final_with_usage(text: str, **usage: Any) -> FakeResponse:
+    payload = {"choices": [{"message": {"role": "assistant", "content": text}}]}
+    payload["usage"] = usage
+    return FakeResponse(payload)
+
+
+def test_extract_usage_variants() -> None:
+    openai = llm_chat.extract_usage(
+        {
+            "usage": {
+                "prompt_tokens": 120,
+                "completion_tokens": 30,
+                "total_tokens": 150,
+                "prompt_tokens_details": {"cached_tokens": 64},
+            }
+        }
+    )
+    assert openai == {
+        "prompt_tokens": 120,
+        "completion_tokens": 30,
+        "cached_tokens": 64,
+        "total_tokens": 150,
+    }
+    deepseek = llm_chat.extract_usage(
+        {
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "prompt_cache_hit_tokens": 40,
+            }
+        }
+    )
+    assert deepseek["cached_tokens"] == 40
+    assert deepseek["total_tokens"] == 120
+    anthropic = llm_chat.extract_usage(
+        {
+            "usage": {
+                "input_tokens": 80,
+                "output_tokens": 12,
+                "cache_read_input_tokens": 50,
+            }
+        }
+    )
+    assert anthropic == {
+        "prompt_tokens": 80,
+        "completion_tokens": 12,
+        "cached_tokens": 50,
+        "total_tokens": 92,
+    }
+    assert llm_chat.extract_usage({}) == {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cached_tokens": 0,
+        "total_tokens": 0,
+    }
+
+
+def test_complete_chat_counts_tokens_and_logs(caplog) -> None:
+    caplog.set_level(logging.INFO, logger="app.services.llm_chat")
+    http = FakeHTTP(
+        [
+            _final_with_usage(
+                "你好",
+                prompt_tokens=120,
+                completion_tokens=30,
+                total_tokens=150,
+                prompt_tokens_details={"cached_tokens": 64},
+            )
+        ]
+    )
+    counter = llm_chat.UsageCounter()
+    message = complete_chat(
+        llm_settings(_snapshot()),
+        [{"role": "user", "content": "hi"}],
+        http=http,
+        usage=counter,
+    )
+    assert message["content"] == "你好"
+    assert counter.as_dict() == {
+        "requests": 1,
+        "prompt_tokens": 120,
+        "completion_tokens": 30,
+        "cached_tokens": 64,
+        "total_tokens": 150,
+        "tool_calls": 0,
+    }
+    assert "prompt_tokens=120" in caplog.text
+    assert "cached_tokens=64" in caplog.text
+    assert "LLM 请求 model=test-model" in caplog.text
+
+
+def test_chat_reply_records_daily_usage(redis_client, caplog) -> None:
+    caplog.set_level(logging.INFO, logger="app.services.llm_chat")
+    http = FakeHTTP(
+        [
+            _final_with_usage(
+                "回复",
+                prompt_tokens=50,
+                completion_tokens=8,
+                total_tokens=58,
+                prompt_tokens_details={"cached_tokens": 20},
+            )
+        ]
+    )
+    reply = chat_reply(
+        snapshot=_snapshot(**{"llm.max_tool_rounds": 0}),
+        session_factory=None,
+        redis_client=redis_client,
+        session_key=SESSION_KEY,
+        text="你好",
+        speaker="群友10002",
+        http=http,
+    )
+    assert reply == "回复"
+    usage = llm_chat.usage_snapshot(redis_client)
+    assert usage["requests"] == 1
+    assert usage["prompt_tokens"] == 50
+    assert usage["completion_tokens"] == 8
+    assert usage["cached_tokens"] == 20
+    assert usage["total_tokens"] == 58
+    assert usage["tool_calls"] == 0
+    assert "LLM 会话结束" in caplog.text
+    assert "cached_tokens=20" in caplog.text
+
+
+def test_chat_reply_counts_tool_calls(redis_client, tool_calls, caplog) -> None:
+    caplog.set_level(logging.INFO, logger="app.services.llm_chat")
+    http = FakeHTTP(
+        [
+            _tool_call("fake_tool", {"query": "条件"}),
+            _final_with_usage(
+                "完成",
+                prompt_tokens=30,
+                completion_tokens=6,
+                total_tokens=36,
+            ),
+        ]
+    )
+    reply = chat_reply(
+        snapshot=_snapshot(),
+        session_factory=None,
+        redis_client=redis_client,
+        session_key=SESSION_KEY,
+        text="查一下",
+        speaker="张三",
+        http=http,
+    )
+    assert reply == "完成"
+    assert tool_calls == [("fake_tool", {"query": "条件"})]
+    usage = llm_chat.usage_snapshot(redis_client)
+    assert usage["tool_calls"] == 1
+    assert usage["requests"] == 2
+    assert usage["prompt_tokens"] == 30
+    assert "LLM 工具调用第 1 轮 tools=fake_tool" in caplog.text
+
+
+def test_usage_snapshot_without_data(redis_client) -> None:
+    usage = llm_chat.usage_snapshot(redis_client)
+    assert usage["requests"] == 0
+    assert usage["cached_tokens"] == 0
+    assert len(usage["date"]) == 10
+
+
+
+# -- 运行时上下文与工具提示 ------------------------------------------------
+def test_runtime_context_and_system_prompt(redis_client) -> None:
+    http = FakeHTTP([_final("好的")])
+    chat_reply(
+        snapshot=_snapshot(**{"llm.max_tool_rounds": 0}),
+        session_factory=None,
+        redis_client=redis_client,
+        session_key=SESSION_KEY,
+        text="今天几号",
+        speaker="用户",
+        http=http,
+    )
+    system_messages = [
+        item["content"]
+        for item in http.bodies[0]["messages"]
+        if item.get("role") == "system"
+    ]
+    assert system_messages[0] == "你是测试助手。"
+    runtime = system_messages[1]
+    assert runtime.startswith("当前时间：")
+    assert "Asia/Shanghai" in runtime
+    assert "星期" in runtime
+    assert "get_market_status" in runtime
+
+
+def test_runtime_context_matches_today() -> None:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    now = datetime(2026, 11, 4, 9, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+    text = llm_chat.runtime_context(now)
+    assert "2026-11-04 09:30" in text
+    assert "星期三" in text
+
+
+def test_tool_slow_notice(redis_client, tool_calls, monkeypatch) -> None:
+    def slow_tool(name, arguments, *, session_factory, snapshot):
+        time.sleep(1.2)
+        return "工具结果"
+
+    monkeypatch.setattr(llm_chat, "run_tool", slow_tool)
+    notices: list[str] = []
+    http = FakeHTTP([
+        _tool_call("fake_tool"),
+        _final("完成"),
+    ])
+    reply = chat_reply(
+        snapshot=_snapshot(
+            **{
+                "llm.tool_slow_notice_seconds": 1,
+                "llm.tool_timeout_seconds": 10,
+            }
+        ),
+        session_factory=None,
+        redis_client=redis_client,
+        session_key=SESSION_KEY,
+        text="查一下",
+        speaker="张三",
+        http=http,
+        on_notice=notices.append,
+    )
+    assert reply == "完成"
+    assert len(notices) == 1
+    assert "查询有点慢" in notices[0]
+
+
+def test_tool_timeout_notifies_and_reports_error(
+    redis_client, tool_calls, monkeypatch
+) -> None:
+    def hanging_tool(name, arguments, *, session_factory, snapshot):
+        time.sleep(3)
+        return "迟到的结果"
+
+    monkeypatch.setattr(llm_chat, "run_tool", hanging_tool)
+    notices: list[str] = []
+    http = FakeHTTP([
+        _tool_call("fake_tool"),
+        _final("超时了"),
+    ])
+    reply = chat_reply(
+        snapshot=_snapshot(
+            **{
+                "llm.tool_slow_notice_seconds": 0,
+                "llm.tool_timeout_seconds": 1,
+            }
+        ),
+        session_factory=None,
+        redis_client=redis_client,
+        session_key=SESSION_KEY,
+        text="查一下",
+        speaker="张三",
+        http=http,
+        on_notice=notices.append,
+    )
+    assert reply == "超时了"
+    assert any("查询超时" in notice for notice in notices)
+    tool_message = http.bodies[1]["messages"][-1]
+    assert tool_message["role"] == "tool"
+    assert "工具执行超时" in tool_message["content"]
+
+
+def test_tool_error_notifies(redis_client, tool_calls, monkeypatch) -> None:
+    def failing_tool(name, arguments, *, session_factory, snapshot):
+        return json.dumps({"error": "筛选字段不合法"}, ensure_ascii=False)
+
+    monkeypatch.setattr(llm_chat, "run_tool", failing_tool)
+    notices: list[str] = []
+    http = FakeHTTP([
+        _tool_call("fake_tool"),
+        _final("查不到"),
+    ])
+    reply = chat_reply(
+        snapshot=_snapshot(),
+        session_factory=None,
+        redis_client=redis_client,
+        session_key=SESSION_KEY,
+        text="查一下",
+        speaker="张三",
+        http=http,
+        on_notice=notices.append,
+    )
+    assert reply == "查不到"
+    assert notices
+    assert "查询失败" in notices[0]
+    assert "筛选字段不合法" in notices[0]
+
+
+
+def _tool_call_with_content(
+    content: str, name: str = "fake_tool", arguments: Any = None
+) -> FakeResponse:
+    if arguments is None:
+        arguments = {"query": "x"}
+    payload_arguments = (
+        arguments if isinstance(arguments, str) else json.dumps(arguments)
+    )
+    return FakeResponse(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": content,
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": name,
+                                    "arguments": payload_arguments,
+                                },
+                            }
+                        ],
+                    }
+                }
+            ]
+        }
+    )
+
+
+def test_tool_call_content_is_sent_as_progress(
+    redis_client, tool_calls
+) -> None:
+    progress: list[str] = []
+    http = FakeHTTP(
+        [
+            _tool_call_with_content("我先查一下数据库，请稍等"),
+            _final("最终结论"),
+        ]
+    )
+    reply = chat_reply(
+        snapshot=_snapshot(),
+        session_factory=None,
+        redis_client=redis_client,
+        session_key=SESSION_KEY,
+        text="茅台现在多少钱",
+        speaker="张三",
+        http=http,
+        on_progress=progress.append,
+    )
+    assert reply == "最终结论"
+    assert progress == ["我先查一下数据库，请稍等"]
+
+
+def test_memory_injected_and_recorded(
+    redis_client, tool_calls, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        llm_chat,
+        "_load_memory",
+        lambda *args, **kwargs: "用户偏好低估值、高股息的标的",
+    )
+    recorded: list[tuple] = []
+    monkeypatch.setattr(
+        llm_chat,
+        "_remember_exchange",
+        lambda *args, **kwargs: recorded.append((args, kwargs)),
+    )
+    http = FakeHTTP([_final("好的")])
+    chat_reply(
+        snapshot=_snapshot(**{"llm.max_tool_rounds": 0}),
+        session_factory=object(),
+        redis_client=redis_client,
+        session_key=SESSION_KEY,
+        text="查一下",
+        speaker="张三",
+        http=http,
+    )
+    system_messages = [
+        item["content"]
+        for item in http.bodies[0]["messages"]
+        if item.get("role") == "system"
+    ]
+    assert any("用户偏好低估值、高股息" in text for text in system_messages)
+    assert recorded
 

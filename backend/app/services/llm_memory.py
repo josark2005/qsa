@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 
 from app.core.db import utcnow
 from app.models.llm_memory import LLMMemory
@@ -534,3 +534,77 @@ def clear_memory(*, session_factory: Any, redis_client: Any, session_key: str) -
             redis_client.delete(key)
         except Exception as exc:
             logger.warning("清理会话%s失败：%s", label, exc)
+
+
+# -- 管理端：会话记忆的查询与维护 ------------------------------------------
+def list_memories(
+    db,
+    *,
+    q: str | None = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> tuple[list[LLMMemory], int]:
+    """分页查询会话记忆；q 同时模糊匹配 session_key 与摘要内容。"""
+
+    filters = []
+    keyword = (q or "").strip()
+    if keyword:
+        pattern = f"%{keyword}%"
+        filters.append(
+            or_(
+                LLMMemory.session_key.ilike(pattern),
+                LLMMemory.summary.ilike(pattern),
+            )
+        )
+    total = int(
+        db.scalar(
+            select(func.count()).select_from(LLMMemory).where(*filters)
+        )
+        or 0
+    )
+    statement = (
+        select(LLMMemory)
+        .where(*filters)
+        .order_by(LLMMemory.updated_at.desc(), LLMMemory.id.desc())
+        .offset((max(1, page) - 1) * max(1, page_size))
+        .limit(max(1, page_size))
+    )
+    return list(db.scalars(statement).all()), total
+
+
+def get_memory(db, memory_id: int) -> LLMMemory | None:
+    return db.get(LLMMemory, memory_id)
+
+
+def update_memory_summary(
+    db, memory_id: int, summary: str
+) -> LLMMemory | None:
+    """管理端直接改写记忆摘要；不 commit（由调用方提交）。"""
+
+    row = db.get(LLMMemory, memory_id)
+    if row is None:
+        return None
+    row.summary = summary
+    db.flush()
+    return row
+
+
+def delete_memory(
+    *, session_factory, redis_client, memory_id: int
+) -> bool:
+    """删除一条记忆，同时清掉缓存与待整理对话；返回是否存在。"""
+
+    if session_factory is None:
+        return False
+    with session_factory() as db:
+        row = db.get(LLMMemory, memory_id)
+        if row is None:
+            return False
+        session_key = str(row.session_key)
+    clear_memory(
+        session_factory=session_factory,
+        redis_client=redis_client,
+        session_key=session_key,
+    )
+    return True
+

@@ -9,6 +9,8 @@ import type {
   SettingsResponse,
   FactorListResponse,
   InstrumentSearchResponse,
+  LLMMemoryItem,
+  LLMMemoryListResponse,
   PersonalQQGroup,
   PersonalQQGroupListResponse,
   PersonalQQStatus,
@@ -337,6 +339,39 @@ export const api = {
       `/admin/personal-qq/groups/${groupId}`,
       { method: "DELETE" },
     )
+  },
+
+  listMemories(params: {
+    q?: string
+    page?: number
+    pageSize?: number
+    signal?: AbortSignal
+  }): Promise<LLMMemoryListResponse> {
+    const query = new URLSearchParams()
+    if (params.q) query.set("q", params.q)
+    if (params.page) query.set("page", String(params.page))
+    if (params.pageSize) query.set("page_size", String(params.pageSize))
+    const suffix = query.toString() ? `?${query.toString()}` : ""
+    return request<LLMMemoryListResponse>(`/admin/memories${suffix}`, {
+      signal: params.signal,
+    })
+  },
+
+  getMemory(id: number, signal?: AbortSignal): Promise<LLMMemoryItem> {
+    return request<LLMMemoryItem>(`/admin/memories/${id}`, { signal })
+  },
+
+  updateMemory(id: number, summary: string): Promise<LLMMemoryItem> {
+    return request<LLMMemoryItem>(`/admin/memories/${id}`, {
+      method: "PATCH",
+      body: { summary },
+    })
+  },
+
+  removeMemory(id: number): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(`/admin/memories/${id}`, {
+      method: "DELETE",
+    })
   },
 
   closePersonalQQChatMode(groupId: string): Promise<{ ok: boolean }> {

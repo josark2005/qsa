@@ -1,5 +1,6 @@
 import {
   Activity,
+  Brain,
   ChevronDown,
   Database,
   FileText,
@@ -31,6 +32,7 @@ import { roleLabel } from "@/lib/format"
 const adminNav = [
   { to: "/admin/data", label: "数据管理", icon: Database },
   { to: "/admin/settings", label: "系统设置", icon: Settings },
+  { to: "/admin/memories", label: "会话记忆", icon: Brain },
   { to: "/admin/users", label: "用户管理", icon: Users },
   { to: "/admin/audit", label: "审计日志", icon: FileText },
 ]

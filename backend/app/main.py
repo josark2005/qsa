@@ -16,6 +16,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.api.routes import (
     admin_audit,
     admin_logs,
+    admin_memories,
     admin_personal_qq,
     admin_settings,
     admin_sync,
@@ -170,6 +171,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.include_router(admin_settings.public_router, prefix=config.api_prefix)
     app.include_router(admin_audit.router, prefix=config.api_prefix)
     app.include_router(admin_logs.router, prefix=config.api_prefix)
+    app.include_router(admin_memories.router, prefix=config.api_prefix)
     app.include_router(admin_sync.router, prefix=config.api_prefix)
     app.include_router(admin_personal_qq.router, prefix=config.api_prefix)
     app.include_router(screen.router, prefix=config.api_prefix)

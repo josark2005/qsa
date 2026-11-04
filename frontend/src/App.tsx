@@ -13,6 +13,7 @@ import { ChangePasswordPage } from "@/pages/ChangePasswordPage"
 import { DashboardPage } from "@/pages/DashboardPage"
 import { DataPage } from "@/pages/DataPage"
 import { LoginPage } from "@/pages/LoginPage"
+import { MemoriesPage } from "@/pages/MemoriesPage"
 import { ReportPage } from "@/pages/ReportPage"
 import { ReportsPage } from "@/pages/ReportsPage"
 import { ScreenerPage } from "@/pages/ScreenerPage"
@@ -64,6 +65,14 @@ function App() {
             element={
               <AdminRoute>
                 <SettingsPage />
+              </AdminRoute>
+            }
+          />
+          <Route
+            path="admin/memories"
+            element={
+              <AdminRoute>
+                <MemoriesPage />
               </AdminRoute>
             }
           />

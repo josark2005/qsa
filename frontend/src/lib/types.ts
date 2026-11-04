@@ -454,6 +454,25 @@ export interface PersonalQQTestResponse {
   retcode: number | null
 }
 
+export interface LLMMemoryItem {
+  id: number
+  session_key: string
+  summary_preview: string
+  summary_chars: number
+  message_count: number
+  last_summarized_at: string | null
+  created_at: string | null
+  updated_at: string | null
+  summary?: string
+}
+
+export interface LLMMemoryListResponse {
+  items: LLMMemoryItem[]
+  total: number
+  page: number
+  page_size: number
+}
+
 export interface SyncRequestCreate {
   kind: "pipeline" | "backfill" | "full_backfill" | "history_import"
   pipeline?: string | null

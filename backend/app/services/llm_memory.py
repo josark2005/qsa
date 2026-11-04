@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -17,7 +18,8 @@ logger = logging.getLogger(__name__)
 MEMORY_CACHE_PREFIX = "qsa:llm:memory:cache:"
 TRANSCRIPT_PREFIX = "qsa:llm:transcript:"
 LOCK_PREFIX = "qsa:llm:memory:lock:"
-TRANSCRIPT_MAX_ENTRIES = 200
+# 待整理对话最多保留 1000 条（单条约 2000 字），容量需覆盖上下文窗口上限。
+TRANSCRIPT_MAX_ENTRIES = 1000
 TRANSCRIPT_TTL_SECONDS = 30 * 86400
 MEMORY_CACHE_SECONDS = 300
 
@@ -27,7 +29,7 @@ MEMORY_LOCK_SECONDS = 600
 TRANSCRIPT_ENTRY_MAX_CHARS = 2000
 # 单次整理最多送入模型的待整理对话字符数。超过时只消费最早的一段，
 # 剩余内容留在 redis 等下一次整理，避免清空后丢失未压缩的对话。
-PROMPT_TRANSCRIPT_MAX_CHARS = 20000
+PROMPT_TRANSCRIPT_MAX_CHARS = 60000
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
@@ -35,7 +37,7 @@ SHANGHAI = ZoneInfo("Asia/Shanghai")
 _FALLBACK_DEFAULTS: dict[str, Any] = {
     "llm.memory_enabled": True,
     "llm.memory_interval_hours": 6,
-    "llm.memory_max_chars": 1200,
+    "llm.memory_max_chars": 50000,
 }
 
 # 记忆整理用的 system 提示：保留长期有用的信息，不编造，限制长度。
@@ -106,7 +108,10 @@ def _memory_options(snapshot: Any) -> tuple[bool, int, int]:
         _setting(snapshot, "llm.memory_interval_hours"), 6, minimum=1, maximum=168
     )
     max_chars = _as_int(
-        _setting(snapshot, "llm.memory_max_chars"), 1200, minimum=200, maximum=4000
+        _setting(snapshot, "llm.memory_max_chars"),
+        50000,
+        minimum=200,
+        maximum=100000,
     )
     return enabled, interval_hours, max_chars
 
@@ -225,6 +230,13 @@ def _transcript_length(redis_client: Any, session_key: str) -> int:
     except Exception as exc:  # pragma: no cover - redis 异常按无记录处理
         logger.warning("读取待整理对话条数失败：%s", exc)
         return 0
+
+
+def transcript_size(redis_client: Any, session_key: str) -> int:
+    """返回待整理记录的字符总数（含分隔符），用于判断上下文窗口是否用满。"""
+
+    entries = _read_transcript(redis_client, session_key)
+    return sum(len(entry) for entry in entries)
 
 
 def _read_transcript(redis_client: Any, session_key: str) -> list[str]:
@@ -447,8 +459,15 @@ def summarize_session(
             ),
         },
     ]
+    settings = llm_settings(snapshot)
+    # 记忆上限可能远大于普通回复：按上限放宽单次输出 token（仍受模型上限约束）。
+    summary_tokens = min(8192, max(settings.max_tokens, max_chars // 2))
     try:
-        message = complete_chat(llm_settings(snapshot), messages, tools=None)
+        message = complete_chat(
+            replace(settings, max_tokens=max(1024, summary_tokens)),
+            messages,
+            tools=None,
+        )
     except LLMError as exc:
         logger.warning("整理会话记忆失败：%s", exc)
         return None

@@ -81,3 +81,21 @@ def test_llm_web_search_defaults() -> None:
     assert values["llm.web_search_enabled"] is True
     assert values["llm.web_search_timeout_seconds"] == 15
 
+
+
+def test_llm_memory_length_defaults() -> None:
+    values = default_values()
+    assert values["llm.memory_max_chars"] == 50000
+    spec = SETTINGS_BY_KEY["llm.memory_max_chars"]
+    assert validate_single_value(spec, 100000) == 100000
+    with pytest.raises(SettingsValidationError):
+        validate_single_value(spec, 100001)
+
+
+def test_llm_context_window_default() -> None:
+    values = default_values()
+    assert values["llm.context_window_chars"] == 500000
+    spec = SETTINGS_BY_KEY["llm.context_window_chars"]
+    assert validate_single_value(spec, 5000000) == 5000000
+    with pytest.raises(SettingsValidationError):
+        validate_single_value(spec, 5000001)

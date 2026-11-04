@@ -926,3 +926,77 @@ def test_memory_injected_and_recorded(
     assert any("用户偏好低估值、高股息" in text for text in system_messages)
     assert recorded
 
+
+
+# -- 做梦 / 上下文窗口 ------------------------------------------------------
+def test_dream_when_context_window_full(
+    redis_client, tool_calls, monkeypatch
+) -> None:
+    from app.services import llm_memory
+
+    state = {"fill": 900000}
+    monkeypatch.setattr(llm_chat, "_transcript_fill", lambda *a, **k: state["fill"])
+    slept: list[str] = []
+
+    def fake_summarize(**kwargs):
+        slept.append(kwargs["session_key"])
+        # 每次整理消化 20 万字符，直到压到窗口（50 万）的一半以下。
+        state["fill"] -= 200000
+        return "新摘要"
+
+    monkeypatch.setattr(llm_memory, "summarize_session", fake_summarize)
+    notices: list[str] = []
+    http = FakeHTTP([_final("回答")])
+    reply = chat_reply(
+        snapshot=_snapshot(**{"llm.max_tool_rounds": 0}),
+        session_factory=object(),
+        redis_client=redis_client,
+        session_key=SESSION_KEY,
+        text="继续聊",
+        speaker="张三",
+        http=http,
+        on_notice=notices.append,
+    )
+    assert reply == "回答"
+    assert notices == [
+        llm_chat.DREAM_BEFORE_TEXT,
+        llm_chat.DREAM_AFTER_TEXT,
+    ]
+    assert llm_chat.DREAM_BEFORE_TEXT == "白饭吃多了，困了。"
+    # 900k -> 700k -> 500k -> 300k -> 100k，低于窗口一半（250k）后停止，共 4 轮。
+    assert slept == [SESSION_KEY] * 4
+    assert len(http.calls) == 1
+
+
+def test_no_dream_below_context_window(
+    redis_client, tool_calls, monkeypatch
+) -> None:
+    from app.services import llm_memory
+
+    monkeypatch.setattr(llm_chat, "_transcript_fill", lambda *a, **k: 100)
+    slept: list[str] = []
+    monkeypatch.setattr(
+        llm_memory,
+        "summarize_session",
+        lambda **kwargs: slept.append(kwargs["session_key"]),
+    )
+    notices: list[str] = []
+    http = FakeHTTP([_final("回答")])
+    chat_reply(
+        snapshot=_snapshot(**{"llm.max_tool_rounds": 0}),
+        session_factory=object(),
+        redis_client=redis_client,
+        session_key=SESSION_KEY,
+        text="继续聊",
+        speaker="张三",
+        http=http,
+        on_notice=notices.append,
+    )
+    assert notices == []
+    assert slept == []
+
+
+def test_context_window_setting_is_500k_by_default(redis_client) -> None:
+    settings = llm_settings(_snapshot())
+    assert settings.context_window_chars == 500000
+

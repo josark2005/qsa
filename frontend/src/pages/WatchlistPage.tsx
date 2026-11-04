@@ -212,7 +212,8 @@ export function WatchlistPage() {
         </p>
       </div>
 
-      <Card>
+      {/* Card 默认 overflow-hidden 会裁掉搜索候选下拉，这里放开。 */}
+      <Card className="overflow-visible">
         <CardHeader className="pb-3">
           <CardTitle className="text-base">添加关注</CardTitle>
           <CardDescription>

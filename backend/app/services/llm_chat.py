@@ -93,6 +93,7 @@ class LLMSettings:
     chat_mode_ttl_seconds: int
     tool_slow_notice_seconds: int
     tool_timeout_seconds: int
+    context_window_chars: int
 
     @property
     def configured(self) -> bool:
@@ -148,7 +149,8 @@ _FALLBACK_DEFAULTS: dict[str, Any] = {
     "llm.tool_timeout_seconds": 30,
     "llm.memory_enabled": True,
     "llm.memory_interval_hours": 6,
-    "llm.memory_max_chars": 1200,
+    "llm.memory_max_chars": 50000,
+    "llm.context_window_chars": 500000,
 }
 
 
@@ -280,6 +282,12 @@ def llm_settings(snapshot: SettingsSnapshot | Any) -> LLMSettings:
             30,
             minimum=1,
             maximum=300,
+        ),
+        context_window_chars=_as_int(
+            _raw(snapshot, "llm.context_window_chars"),
+            500000,
+            minimum=10000,
+            maximum=5000000,
         ),
     )
 
@@ -910,6 +918,59 @@ def _remember_exchange(
         logger.warning("记录 LLM 记忆失败", exc_info=True)
 
 
+DREAM_BEFORE_TEXT = "白饭吃多了，困了。"
+DREAM_AFTER_TEXT = "我醒啦。"
+# 一次「做梦」最多连续整理几轮，避免模型异常时陷入长循环。
+DREAM_MAX_ROUNDS = 12
+
+
+def _transcript_fill(redis_client: Any, session_key: str) -> int:
+    """待整理对话的字符数，用来判断是否到了「做梦」的上下文窗口上限。"""
+
+    try:
+        from app.services import llm_memory
+
+        return int(llm_memory.transcript_size(redis_client, session_key))
+    except Exception:
+        return 0
+
+
+def _dream(
+    session_factory: Any,
+    redis_client: Any,
+    snapshot: Any,
+    session_key: str,
+    on_notice: Callable[[str], None] | None,
+) -> None:
+    """上下文窗口用满：先睡一觉（把累积对话压成长期记忆），醒来继续聊。"""
+
+    _notify(on_notice, DREAM_BEFORE_TEXT)
+    settings = llm_settings(snapshot)
+    # 目标：把累积对话压到窗口的一半左右，避免每次只消化一点点就反复「做梦」。
+    target = max(1000, int(settings.context_window_chars * 0.5))
+    rounds = 0
+    while rounds < DREAM_MAX_ROUNDS:
+        if _transcript_fill(redis_client, session_key) <= target:
+            break
+        try:
+            from app.services import llm_memory
+
+            summary = llm_memory.summarize_session(
+                session_factory=session_factory,
+                redis_client=redis_client,
+                snapshot=snapshot,
+                session_key=session_key,
+            )
+        except Exception:  # pragma: no cover - 做梦失败也要醒来继续对话
+            logger.warning("做梦（记忆整理）失败 session=%s", session_key, exc_info=True)
+            break
+        if summary is None:
+            logger.warning("做梦（记忆整理）没有产生新摘要 session=%s", session_key)
+            break
+        rounds += 1
+    _notify(on_notice, DREAM_AFTER_TEXT)
+
+
 def chat_reply(
     *,
     snapshot: SettingsSnapshot | Any,
@@ -940,6 +1001,21 @@ def chat_reply(
     started = time.monotonic()
     usage = UsageCounter()
     prompt = str(text or "").strip()
+    memory_enabled = _as_bool(_raw(snapshot, "llm.memory_enabled"))
+    # 累积对话达到上下文窗口上限时先做梦（记忆整理），醒来再回答本轮问题。
+    if (
+        memory_enabled
+        and session_factory is not None
+        and _transcript_fill(redis_client, session_key)
+        >= settings.context_window_chars
+    ):
+        _dream(
+            session_factory,
+            redis_client,
+            snapshot,
+            session_key,
+            on_notice,
+        )
     # 历史轮数为 0 时既不携带历史，也顺手清理旧 key。
     history = (
         _load_history(redis_client, session_key) if settings.history_turns > 0 else []
@@ -950,7 +1026,6 @@ def chat_reply(
         messages.append({"role": "system", "content": settings.system_prompt})
     # 运行时上下文（当前日期/星期）每轮注入，避免模型自行推测日期。
     messages.append({"role": "system", "content": runtime_context()})
-    memory_enabled = _as_bool(_raw(snapshot, "llm.memory_enabled"))
     if memory_enabled and session_factory is not None:
         memory_text = _load_memory(session_factory, redis_client, session_key)
         if memory_text:
@@ -1051,8 +1126,16 @@ def chat_reply(
     return reply
 
 
+PERSONA_INSTRUCTION = (
+    "角色设定：你叫「大肥鱼」，是 QSA 的数据助手，爱吃大白饭。"
+    "除非用户明确要求，否则不要使用 Markdown（不要用 ** 加粗、# 标题、列表符号、表格、代码块），"
+    "用口语化的纯文本短句回复，像在群里聊天一样自然。"
+    "不要主动追问用户‘还想查什么’，也不要每句都邀请用户继续提问。"
+)
+
+
 def runtime_context(now: datetime | None = None) -> str:
-    """当前时间与日期口径说明，避免模型自行猜测星期或交易日。"""
+    """当前时间、角色设定与回复格式要求，每轮都会注入。"""
 
     moment = now or datetime.now(SHANGHAI)
     weekday = WEEKDAY_LABELS[moment.weekday()]
@@ -1064,6 +1147,7 @@ def runtime_context(now: datetime | None = None) -> str:
         "回答保持简洁专业，不使用颜文字或 emoji；"
         "任务较复杂时先回复已经查到的部分并说明还在查询，完成后再给最终结论；"
         "工具报错、超时或没有数据时如实说明原因，不要编造。"
+        + PERSONA_INSTRUCTION
     )
 
 

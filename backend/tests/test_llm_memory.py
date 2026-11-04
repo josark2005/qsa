@@ -117,7 +117,8 @@ def test_record_exchange_appends_entries_with_limit_and_ttl(redis_client) -> Non
     assert redis_client.ttl(TRANSCRIPT_KEY) > 0
     entries = redis_client.lrange(TRANSCRIPT_KEY, 0, -1)
     assert entries[0] == "用户：问题5\n助手：回答5"
-    assert entries[-1] == "用户：问题204\n助手：回答204"
+    last = llm_memory.TRANSCRIPT_MAX_ENTRIES + 4
+    assert entries[-1] == f"用户：问题{last}\n助手：回答{last}"
     assert redis_client.ttl(TRANSCRIPT_KEY) <= llm_memory.TRANSCRIPT_TTL_SECONDS
 
 
@@ -482,4 +483,71 @@ def test_chat_reply_injects_memory_and_records(container, redis_client, monkeypa
     assert len(transcript) == 1
     assert "茅台怎么样" in transcript[0]
     assert "最终回答" in transcript[0]
+
+
+
+def test_memory_options_default_and_clamp() -> None:
+    enabled, interval, max_chars = llm_memory._memory_options(
+        SettingsSnapshot({}, {}, None)
+    )
+    assert enabled is True
+    assert interval == 6
+    assert max_chars == 50000
+
+    _, _, clamped = llm_memory._memory_options(
+        SettingsSnapshot({"llm.memory_max_chars": 500000}, {}, None)
+    )
+    assert clamped == 100000
+
+    _, _, minimum = llm_memory._memory_options(
+        SettingsSnapshot({"llm.memory_max_chars": 10}, {}, None)
+    )
+    assert minimum == 200
+
+
+def test_summarize_session_raises_output_tokens(container, redis_client, monkeypatch) -> None:
+    seen: list[Any] = []
+
+    def fake_complete_chat(settings, messages, *, tools=None, http=None, usage=None):
+        seen.append(settings)
+        return {"role": "assistant", "content": "摘要"}
+
+    monkeypatch.setattr(llm_memory, "complete_chat", fake_complete_chat)
+    _record(redis_client, 1)
+    snapshot = _snapshot(
+        container,
+        **{
+            "llm.enabled": True,
+            "llm.base_url": "http://127.0.0.1:9999/v1",
+            "llm.model": "test-model",
+            "llm.max_tokens": 800,
+            "llm.memory_max_chars": 50000,
+        },
+    )
+    _call_summarize(container, redis_client, snapshot)
+    assert seen
+    # 记忆摘要可能远长于普通回复，整理时会把输出 token 上限放宽到 8192。
+    assert seen[0].max_tokens == 8192
+
+
+
+def test_transcript_size_counts_characters(redis_client) -> None:
+    assert llm_memory.transcript_size(redis_client, SESSION_KEY) == 0
+    llm_memory.record_exchange(
+        redis_client=redis_client,
+        session_key=SESSION_KEY,
+        user_text="问题一",
+        assistant_text="回答一",
+    )
+    llm_memory.record_exchange(
+        redis_client=redis_client,
+        session_key=SESSION_KEY,
+        user_text="问题二",
+        assistant_text="回答二",
+    )
+    entries = redis_client.lrange(TRANSCRIPT_KEY, 0, -1)
+    assert llm_memory.transcript_size(redis_client, SESSION_KEY) == sum(
+        len(entry) for entry in entries
+    )
+    assert llm_memory.transcript_size(redis_client, SESSION_KEY) > 0
 

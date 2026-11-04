@@ -704,7 +704,11 @@ SETTING_SPECS: tuple[SettingSpec, ...] = (
             "6. 任务较复杂（需要多次查询或同时查库和联网搜索）时分阶段回复："
             "先给出已经查到的部分并说明还在查询，收到全部结果后再给最终结论，"
             "不要让用户干等；"
-            "7. 不提供买卖建议，只陈述数据与筛选结果。"
+            "7. 除非用户明确要求，否则不要使用 Markdown（不要用 ** 加粗、# 标题、"
+            "列表符号、表格、代码块），用口语化的纯文本短句回复；"
+            "8. 不要主动追问用户想查什么，也不要每句都邀请用户继续提问；"
+            "9. 角色设定：你的名字叫「大肥鱼」，是 QSA 的数据助手，爱吃大白饭；"
+            "10. 不提供买卖建议，只陈述数据与筛选结果。"
         ),
         description="每轮对话都会作为 system 消息发送，用于约束模型语气与行为。",
         multiline=True,
@@ -867,11 +871,28 @@ SETTING_SPECS: tuple[SettingSpec, ...] = (
         label="记忆长度上限",
         group="llm",
         type="int",
-        default=1200,
+        default=50000,
         minimum=200,
-        maximum=4000,
-        description="单个会话的记忆摘要最大字数，超过时整理阶段会要求模型压缩。",
+        maximum=100000,
+        description=(
+            "单个会话的记忆摘要最大字数，默认 5 万，上限 10 万；"
+            "超过时整理阶段会要求模型压缩。实际长度还受模型单次输出 token 限制。"
+        ),
         order=23,
+    ),
+    SettingSpec(
+        key="llm.context_window_chars",
+        label="上下文窗口",
+        group="llm",
+        type="int",
+        default=500000,
+        minimum=10000,
+        maximum=5000000,
+        description=(
+            "对话累积到该字符数时进入「做梦」：先把这段时间的对话压缩成长期记忆，"
+            "再继续对话。默认 50 万字符，可按需调大。"
+        ),
+        order=24,
     ),
     SettingSpec(
         key="llm.chat_per_minute",

@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import html
 import logging
-import re
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import unquote
+from urllib.parse import urljoin
 
 import requests
 
@@ -14,27 +12,13 @@ from app.core.settings_service import SettingsSnapshot
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 15
-MAX_RESULTS = 5
-DUCKDUCKGO_ENDPOINT = "https://html.duckduckgo.com/html/"
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    " (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-)
-
-_RESULT_RE = re.compile(
-    r'<a[^>]+class="result__a"[^>]+href="(?P<href>[^"]+)"[^>]*>(?P<title>.*?)</a>',
-    re.S,
-)
-_SNIPPET_RE = re.compile(
-    r'class="result__snippet"[^>]*>(?P<snippet>.*?)</a>', re.S
-)
-_TAG_RE = re.compile(r"<[^>]+>")
-_SPACE_RE = re.compile(r"\s+")
-_REDIRECT_RE = re.compile(r"[?&]uddg=([^&]+)")
+MAX_RESULTS = 10
+USER_AGENT = "QSA/0.1 (+https://github.com/josark2005/qsa)"
+JSON_FORMAT_HINT = "请在 SearXNG 实例的 settings.yml 中把 search.formats 设为包含 json"
 
 
 class WebSearchError(RuntimeError):
-    """搜索服务不可用或返回异常。"""
+    """搜索服务未配置或调用失败。"""
 
 
 @dataclass(frozen=True)
@@ -47,44 +31,81 @@ class SearchHit:
         return {"title": self.title, "url": self.url, "snippet": self.snippet}
 
 
-def _clean(text: str) -> str:
-    return _SPACE_RE.sub(" ", html.unescape(_TAG_RE.sub("", text))).strip()
+def _text(value: Any) -> str:
+    if value is None:
+        return ""
+    return " ".join(str(value).split()).strip()
 
 
-def _decode_url(href: str) -> str:
-    href = html.unescape(href)
-    match = _REDIRECT_RE.search(href)
-    if match:
-        return unquote(match.group(1))
-    if href.startswith("//"):
-        return f"https:{href}"
-    return href
+def parse_searxng_results(
+    payload: Any, *, limit: int = MAX_RESULTS
+) -> list[SearchHit]:
+    """解析 SearXNG 的 JSON 结果，兼容顶层对象或直接的 results 列表。"""
 
-
-def parse_duckduckgo_html(markup: str, *, limit: int = MAX_RESULTS) -> list[SearchHit]:
-    """解析 DuckDuckGo html 版结果页；结构变化时返回空列表而不是抛错。"""
-
-    titles = list(_RESULT_RE.finditer(markup))
-    snippets = [
-        _clean(match.group("snippet"))
-        for match in _SNIPPET_RE.finditer(markup)
-    ]
+    if isinstance(payload, dict):
+        raw_results = payload.get("results")
+    elif isinstance(payload, list):
+        raw_results = payload
+    else:
+        raw_results = None
+    if not isinstance(raw_results, list):
+        return []
     hits: list[SearchHit] = []
-    for index, match in enumerate(titles[:limit]):
-        url = _decode_url(match.group("href"))
-        title = _clean(match.group("title"))
-        if not url or not title:
+    seen: set[str] = set()
+    for item in raw_results:
+        if not isinstance(item, dict):
             continue
-        snippet = snippets[index] if index < len(snippets) else ""
+        url = _text(item.get("url"))
+        title = _text(item.get("title"))
+        if not url or not title or url in seen:
+            continue
+        seen.add(url)
+        snippet = _text(
+            item.get("content") or item.get("snippet") or item.get("description")
+        )
         hits.append(SearchHit(title=title, url=url, snippet=snippet))
+        if len(hits) >= max(1, int(limit)):
+            break
     return hits
 
 
-def _search_timeout(snapshot: SettingsSnapshot) -> float:
+def _base_url(snapshot: SettingsSnapshot | Any) -> str:
+    try:
+        return str(snapshot.get("llm.web_search_base_url") or "").strip()
+    except Exception:
+        return ""
+
+
+def _endpoint(base_url: str) -> str:
+    """接受 https://searx.example.com 或带 /search 的完整地址。"""
+
+    base = base_url.rstrip("/")
+    if base.endswith("/search"):
+        return base
+    return urljoin(base + "/", "search")
+
+
+def _search_timeout(snapshot: SettingsSnapshot | Any) -> float:
     try:
         return float(snapshot.get_int("llm.web_search_timeout_seconds"))
     except Exception:
         return float(DEFAULT_TIMEOUT)
+
+
+def _language(snapshot: SettingsSnapshot | Any) -> str:
+    try:
+        return str(snapshot.get("llm.web_search_language") or "").strip()
+    except Exception:
+        return ""
+
+
+def _http_get(url: str, *, params: dict[str, Any], timeout: float):
+    return requests.get(
+        url,
+        params=params,
+        headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+        timeout=timeout,
+    )
 
 
 def web_search(
@@ -93,33 +114,65 @@ def web_search(
     snapshot: SettingsSnapshot,
     limit: int = MAX_RESULTS,
 ) -> list[dict[str, str]]:
-    """执行一次网页搜索，返回标题 / 链接 / 摘要。
+    """调用外部 SearXNG 实例执行一次搜索，返回标题 / 链接 / 摘要。
 
-    使用不需要 API Key 的 DuckDuckGo html 版；网络或结构异常时抛
-    `WebSearchError`，由工具层转成纯文本错误交给模型，不向上冒泡。
-    """
+    地址来自系统设置 llm.web_search_base_url；未配置、网络异常或实例未开启
+    JSON 输出时抛 WebSearchError，由工具层转成纯文本错误交给模型。"""
 
     needle = (query or "").strip()
     if not needle:
         raise WebSearchError("搜索关键词为空")
+    base_url = _base_url(snapshot)
+    if not base_url:
+        raise WebSearchError(
+            "未配置 SearXNG 地址：请在系统设置「LLM 对话」中填写搜索地址（llm.web_search_base_url）"
+        )
     limit = max(1, min(int(limit), MAX_RESULTS))
+    params: dict[str, Any] = {
+        "q": needle,
+        "format": "json",
+        "categories": "general",
+        "safesearch": 0,
+    }
+    language = _language(snapshot)
+    if language:
+        params["language"] = language
     try:
-        response = requests.get(
-            DUCKDUCKGO_ENDPOINT,
-            params={"q": needle},
-            headers={"User-Agent": USER_AGENT},
+        response = _http_get(
+            _endpoint(base_url),
+            params=params,
             timeout=_search_timeout(snapshot),
         )
     except Exception as exc:
-        logger.warning("web search request failed: %s", exc)
+        logger.warning("SearXNG 请求失败：%s", exc)
         raise WebSearchError(
             f"搜索请求失败：{type(exc).__name__}"
         ) from exc
-    if not response.ok:
-        raise WebSearchError(f"搜索服务返回 HTTP {response.status_code}")
-    hits = parse_duckduckgo_html(response.text, limit=limit)
-    if not hits:
-        raise WebSearchError("搜索没有返回可解析的结果")
+
+    status = getattr(response, "status_code", None)
+    ok = getattr(response, "ok", None)
+    if ok is None:
+        ok = isinstance(status, int) and 200 <= status < 300
+    if not ok:
+        if status in (401, 403):
+            raise WebSearchError(
+                f"SearXNG 返回 HTTP {status}：实例可能未开放 JSON 输出，{JSON_FORMAT_HINT}"
+            )
+        raise WebSearchError(f"搜索服务返回 HTTP {status}")
+
+    try:
+        payload = response.json()
+    except Exception as exc:
+        raise WebSearchError(
+            f"搜索服务返回的不是合法 JSON：{JSON_FORMAT_HINT}"
+        ) from exc
+
+    if isinstance(payload, dict) and payload.get("error"):
+        raise WebSearchError(
+            f"搜索服务返回错误：{_text(payload.get('error'))[:200]}"
+        )
+
+    hits = parse_searxng_results(payload, limit=limit)
     return [hit.to_dict() for hit in hits]
 
 

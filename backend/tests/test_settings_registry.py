@@ -58,3 +58,26 @@ def test_cross_field_window_validation() -> None:
                 "screening.default_low_window_days": 750,
             }
         )
+
+
+def test_llm_search_base_url_validation() -> None:
+    spec = SETTINGS_BY_KEY["llm.web_search_base_url"]
+    assert validate_single_value(spec, "") == ""
+    assert (
+        validate_single_value(spec, "  http://searxng:8080  ")
+        == "http://searxng:8080"
+    )
+    with pytest.raises(SettingsValidationError):
+        validate_single_value(spec, "searxng:8080")
+    llm_spec = SETTINGS_BY_KEY["llm.base_url"]
+    with pytest.raises(SettingsValidationError):
+        validate_single_value(llm_spec, "api.example.com/v1")
+
+
+def test_llm_web_search_defaults() -> None:
+    values = default_values()
+    assert values["llm.web_search_base_url"] == ""
+    assert values["llm.web_search_language"] == ""
+    assert values["llm.web_search_enabled"] is True
+    assert values["llm.web_search_timeout_seconds"] == 15
+

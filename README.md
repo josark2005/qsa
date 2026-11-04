@@ -237,10 +237,30 @@ API Key 与模型名（`llm.model`）后打开 `llm.enabled`。群内 @ 机器�
 
 模型可以调用只读的搜索工具：`search_instruments`（按名称/代码搜标的）、`get_instrument_profile`（行情+财务+股东）、
 `get_price_history`（区间涨跌幅/高低点）、`screen_instruments`（按条件筛选数量与前几只）、
-`list_screening_factors`（可用筛选字段）以及 `web_search`（DuckDuckGo html 版，无需 API Key，可在
-「启用网页搜索」中关闭；无外网时返回错误文本，不影响对话）。管理端「系统设置 → 个人号机器人」卡片会显示
+`list_screening_factors`（可用筛选字段）以及 `web_search`（调用外部 SearXNG 实例，地址填在
+「SearXNG 地址」中；实例需在 `settings.yml` 的 `search.formats` 里启用 `json`，可在「启用网页搜索」中关闭；
+实例不可用时返回错误文本，不影响对话）。管理端「系统设置 → 个人号机器人」卡片会显示
 模型配置状态和当前处于聊天模式的群，并可手动关闭某个群的聊天模式；对话次数受 `llm.chat_per_minute` /
 `llm.chat_per_day` 限制。所有工具只读，不会生成报表。
+
+SearXNG 可以自建，容器内的 backend/worker 用 `host.docker.internal` 访问宿主机实例：
+
+```yaml
+# searxng/settings.yml（用 -v ./searxng:/etc/searxng 挂载）
+search:
+  formats:
+    - html
+    - json
+```
+
+```bash
+docker run -d --name searxng -p 8888:8080 \
+  -e SEARXNG_SECRET=$(openssl rand -hex 32) \
+  -v "$PWD/searxng:/etc/searxng" searxng/searxng
+```
+
+然后在系统设置里把「SearXNG 地址」填为 `http://host.docker.internal:8888`（本机直接跑 API 时用
+`http://127.0.0.1:8888`），「搜索语言」可留空或填 `zh-CN`。
 
 ### 网络代理
 

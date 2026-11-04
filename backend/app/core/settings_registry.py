@@ -774,10 +774,33 @@ SETTING_SPECS: tuple[SettingSpec, ...] = (
         type="bool",
         default=True,
         description=(
-            "允许模型调用联网搜索工具（DuckDuckGo html 版，无需 API Key）；"
+            "允许模型调用联网搜索工具；需要同时填写 SearXNG 地址。"
             "关闭后模型只能使用系统内部的筛选与行情工具。"
         ),
-        order=11,
+        order=12,
+    ),
+    SettingSpec(
+        key="llm.web_search_base_url",
+        label="SearXNG 地址",
+        group="llm",
+        type="str",
+        default="",
+        description=(
+            "外部 SearXNG 实例地址，例如 http://searxng:8080 或 "
+            "http://host.docker.internal:8888；实际请求 {地址}/search?format=json。"
+            "该实例需要在 settings.yml 的 search.formats 中包含 json。留空表示不启用联网搜索。"
+        ),
+        order=13,
+        tags=("network",),
+    ),
+    SettingSpec(
+        key="llm.web_search_language",
+        label="搜索语言",
+        group="llm",
+        type="str",
+        default="",
+        description="SearXNG 的 language 参数，例如 zh-CN；留空表示不限语言。",
+        order=14,
     ),
     SettingSpec(
         key="llm.web_search_timeout_seconds",
@@ -788,7 +811,7 @@ SETTING_SPECS: tuple[SettingSpec, ...] = (
         minimum=3,
         maximum=120,
         description="单次联网搜索请求的超时时间，单位秒。",
-        order=12,
+        order=15,
         tags=("network",),
     ),
     SettingSpec(
@@ -803,7 +826,7 @@ SETTING_SPECS: tuple[SettingSpec, ...] = (
             "聊天模式在无新消息后自动关闭的时长，单位秒；"
             "每次对话都会重新计时，也可发送「关闭聊天模式」立即退出。"
         ),
-        order=12,
+        order=16,
     ),
     SettingSpec(
         key="llm.chat_per_minute",
@@ -814,7 +837,7 @@ SETTING_SPECS: tuple[SettingSpec, ...] = (
         minimum=1,
         maximum=100,
         description="单个 QQ 用户每分钟最多发起的对话请求数。",
-        order=13,
+        order=17,
     ),
     SettingSpec(
         key="llm.chat_per_day",
@@ -825,7 +848,7 @@ SETTING_SPECS: tuple[SettingSpec, ...] = (
         minimum=1,
         maximum=10000,
         description="单个 QQ 用户每天最多发起的对话请求数。",
-        order=14,
+        order=18,
     ),
     SettingSpec(
         key="maintenance.enabled",
@@ -917,13 +940,18 @@ def validate_single_value(spec: SettingSpec, value: Any) -> Any:
             raise SettingsValidationError(f"{spec.key} 必须是字符串")
         if spec.key == "screening.default_conditions":
             return validate_default_conditions(value)
-        if spec.key in {"llm.base_url", "llm.model"}:
+        if spec.key in {
+            "llm.base_url",
+            "llm.model",
+            "llm.web_search_base_url",
+            "llm.web_search_language",
+        }:
             value = value.strip()
-        if spec.key == "llm.base_url" and value and not value.startswith(
-            ("http://", "https://")
+        if spec.key in {"llm.base_url", "llm.web_search_base_url"} and value and (
+            not value.startswith(("http://", "https://"))
         ):
             raise SettingsValidationError(
-                "llm.base_url 必须以 http:// 或 https:// 开头"
+                f"{spec.key} 必须以 http:// 或 https:// 开头"
             )
         if spec.choices is not None and value not in spec.choices:
             raise SettingsValidationError(

@@ -26,6 +26,9 @@ logger = logging.getLogger(__name__)
 MAX_TOOL_CHARS = 4000
 # 工具参数上限。
 MAX_LIMIT = 20
+# 网页搜索返回条数：条数越多，塞进上下文的 token 越多。
+DEFAULT_WEB_SEARCH_LIMIT = 5
+MAX_WEB_SEARCH_LIMIT = 10
 DEFAULT_SEARCH_LIMIT = 10
 DEFAULT_HISTORY_DAYS = 60
 MIN_HISTORY_DAYS = 5
@@ -38,6 +41,9 @@ SCREEN_FETCH_PAGESIZE = 100
 DATA_NOTE = "数据来自 QSA 本地库，可能不是最新交易日。"
 
 WEB_SEARCH_DISABLED = "网页搜索未启用"
+WEB_SEARCH_UNCONFIGURED = (
+    "网页搜索未配置 SearXNG 地址，请联系管理员在系统设置「LLM 对话」中填写"
+)
 
 
 class ToolArgumentError(ValueError):
@@ -300,7 +306,7 @@ def tool_definitions(*, include_web_search: bool = True) -> list[dict[str, Any]]
         tools.append(
             _function(
                 "web_search",
-                "联网搜索最新资讯、公告或新闻，返回标题、链接与摘要。",
+                "通过 SearXNG 联网搜索最新资讯、公告或新闻，返回标题、链接与摘要。",
                 {
                     "query": {
                         "type": "string",
@@ -308,9 +314,9 @@ def tool_definitions(*, include_web_search: bool = True) -> list[dict[str, Any]]
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "返回条数上限，1-20，默认 5",
+                        "description": "返回条数上限，1-10，默认 5",
                         "minimum": 1,
-                        "maximum": MAX_LIMIT,
+                        "maximum": MAX_WEB_SEARCH_LIMIT,
                     },
                 },
                 ["query"],
@@ -812,8 +818,12 @@ def _web_search_tool(
 ) -> dict[str, Any]:
     if not _web_search_enabled(snapshot):
         raise ToolArgumentError(WEB_SEARCH_DISABLED)
+    if not _web_search_configured(snapshot):
+        raise ToolArgumentError(WEB_SEARCH_UNCONFIGURED)
     query = _as_str_arg(arguments, "query", required=True)
-    limit = _as_int_arg(arguments, "limit", 5, minimum=1, maximum=MAX_LIMIT)
+    limit = _as_int_arg(
+        arguments, "limit", DEFAULT_WEB_SEARCH_LIMIT, minimum=1, maximum=MAX_WEB_SEARCH_LIMIT
+    )
     hits = _web_search(query, snapshot=snapshot, limit=limit)
     results = [
         {
@@ -829,6 +839,13 @@ def _web_search_tool(
 def _web_search_enabled(snapshot: Any) -> bool:
     try:
         return bool(snapshot.get_bool("llm.web_search_enabled"))
+    except Exception:
+        return False
+
+
+def _web_search_configured(snapshot: Any) -> bool:
+    try:
+        return bool(str(snapshot.get("llm.web_search_base_url") or "").strip())
     except Exception:
         return False
 

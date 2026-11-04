@@ -432,6 +432,9 @@ def test_web_search_passthrough(
         ]
 
     monkeypatch.setattr(llm_tools, "_web_search", fake_search)
+    snapshot = _snapshot_with(
+        container, **{"llm.web_search_base_url": "http://searx.local:8888"}
+    )
 
     payload = json.loads(
         run_tool(
@@ -467,6 +470,30 @@ def test_web_search_disabled(app_fixture, container, monkeypatch) -> None:
     payload = json.loads(text)
     assert "error" in payload
     assert "网页搜索未启用" in payload["error"]
+
+
+def test_web_search_unconfigured(app_fixture, container, monkeypatch) -> None:
+    def fake_search(*args, **kwargs):  # pragma: no cover - 不应被调用
+        raise AssertionError("未配置 SearXNG 时不应调用搜索")
+
+    monkeypatch.setattr(llm_tools, "_web_search", fake_search)
+    snapshot = _snapshot_with(
+        container,
+        **{
+            "llm.web_search_enabled": True,
+            "llm.web_search_base_url": "",
+        },
+    )
+
+    text = run_tool(
+        "web_search",
+        {"query": "任意关键词"},
+        session_factory=container.session_factory,
+        snapshot=snapshot,
+    )
+    payload = json.loads(text)
+    assert "error" in payload
+    assert "SearXNG" in payload["error"]
 
 
 # ---------------------------------------------------------------------------

@@ -69,6 +69,7 @@ class LLMSettings:
     history_turns: int
     tools_enabled: bool
     web_search_enabled: bool
+    web_search_base_url: str
     chat_mode_ttl_seconds: int
 
     @property
@@ -95,6 +96,8 @@ _FALLBACK_DEFAULTS: dict[str, Any] = {
     "llm.history_turns": 8,
     "llm.search_enabled": True,
     "llm.web_search_enabled": True,
+    "llm.web_search_base_url": "",
+    "llm.web_search_language": "",
     "llm.web_search_timeout_seconds": 15,
     "llm.chat_mode_ttl_seconds": 3600,
 }
@@ -205,7 +208,12 @@ def llm_settings(snapshot: SettingsSnapshot | Any) -> LLMSettings:
             _raw(snapshot, "llm.history_turns"), 8, minimum=0, maximum=50
         ),
         tools_enabled=_as_bool(_raw(snapshot, "llm.search_enabled")),
-        web_search_enabled=_as_bool(_raw(snapshot, "llm.web_search_enabled")),
+        # 没填 SearXNG 地址时不把联网搜索工具暴露给模型，避免无意义调用。
+        web_search_enabled=(
+            _as_bool(_raw(snapshot, "llm.web_search_enabled"))
+            and bool(_as_str(_raw(snapshot, "llm.web_search_base_url")))
+        ),
+        web_search_base_url=_as_str(_raw(snapshot, "llm.web_search_base_url")),
         chat_mode_ttl_seconds=_as_int(
             _raw(snapshot, "llm.chat_mode_ttl_seconds"),
             3600,

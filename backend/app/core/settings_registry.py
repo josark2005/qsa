@@ -25,6 +25,7 @@ GROUP_LABELS = {
     "sync": "数据同步",
     "qq_bot": "QQ 机器人",
     "personal_qq": "个人号机器人",
+    "llm": "LLM 对话",
     "maintenance": "维护",
 }
 
@@ -638,6 +639,194 @@ SETTING_SPECS: tuple[SettingSpec, ...] = (
         order=7,
     ),
     SettingSpec(
+        key="llm.enabled",
+        label="启用 LLM 对话",
+        group="llm",
+        type="bool",
+        default=False,
+        description=(
+            "开启后个人号机器人可以接入 OpenAI 兼容的大模型接口。"
+            "群内 @ 机器人并发送「开启聊天模式」后，该群 @ 机器人的消息会"
+            "转给模型回答（私聊直接提问）；发送「关闭聊天模式」退出。默认关闭。"
+        ),
+        order=1,
+    ),
+    SettingSpec(
+        key="llm.base_url",
+        label="模型接口地址",
+        group="llm",
+        type="str",
+        default="",
+        description=(
+            "OpenAI 兼容的 Chat Completions 基础地址，例如 "
+            "https://api.openai.com/v1 或 http://host.docker.internal:11434/v1；"
+            "实际请求路径为 {base_url}/chat/completions。留空表示未配置。"
+        ),
+        order=2,
+        tags=("network",),
+    ),
+    SettingSpec(
+        key="llm.api_key",
+        label="模型 API Key",
+        group="llm",
+        type="str",
+        default="",
+        sensitive=True,
+        description="调用模型接口使用的 Bearer Token；本地模型无需鉴权时留空。",
+        order=3,
+    ),
+    SettingSpec(
+        key="llm.model",
+        label="模型名称",
+        group="llm",
+        type="str",
+        default="",
+        description="请求中使用的 model 字段，例如 gpt-4o-mini、qwen-plus、deepseek-chat。",
+        order=4,
+    ),
+    SettingSpec(
+        key="llm.system_prompt",
+        label="系统提示词",
+        group="llm",
+        type="str",
+        default=(
+            "你是 QSA 条件筛选系统的对话助手，用简体中文简洁回答，"
+            "一般不超过 200 字。涉及具体标的的行情、财务或筛选数量时，"
+            "必须先调用工具查询，不要编造数据；回答时注明数据日期。"
+            "不提供买卖建议，只陈述数据与筛选结果。"
+        ),
+        description="每轮对话都会作为 system 消息发送，用于约束模型语气与行为。",
+        multiline=True,
+        order=5,
+    ),
+    SettingSpec(
+        key="llm.temperature",
+        label="采样温度",
+        group="llm",
+        type="float",
+        default=0.7,
+        minimum=0.0,
+        maximum=2.0,
+        description="数值越低回答越稳定，越高越发散。",
+        order=6,
+    ),
+    SettingSpec(
+        key="llm.max_tokens",
+        label="单条回复上限",
+        group="llm",
+        type="int",
+        default=800,
+        minimum=64,
+        maximum=8192,
+        description="单次模型回复允许的最大 token 数；QQ 消息会被截断为 1800 字以内。",
+        order=7,
+    ),
+    SettingSpec(
+        key="llm.timeout_seconds",
+        label="请求超时",
+        group="llm",
+        type="int",
+        default=60,
+        minimum=5,
+        maximum=300,
+        description="单次模型请求的超时时间，单位秒；工具调用会重新计时。",
+        order=8,
+    ),
+    SettingSpec(
+        key="llm.max_tool_rounds",
+        label="工具调用轮数上限",
+        group="llm",
+        type="int",
+        default=3,
+        minimum=0,
+        maximum=8,
+        description="一轮对话中允许模型连续调用搜索工具的最大次数；0 表示禁用工具调用。",
+        order=9,
+    ),
+    SettingSpec(
+        key="llm.history_turns",
+        label="上下文轮数",
+        group="llm",
+        type="int",
+        default=8,
+        minimum=0,
+        maximum=50,
+        description="保留最近多少轮问答作为上下文；0 表示不保留历史。",
+        order=10,
+    ),
+    SettingSpec(
+        key="llm.search_enabled",
+        label="启用搜索工具",
+        group="llm",
+        type="bool",
+        default=True,
+        description=(
+            "允许模型调用标的搜索、行情、财务、技术指标和条件筛选等只读工具；"
+            "关闭后模型只能基于对话内容回答。"
+        ),
+        order=11,
+    ),
+    SettingSpec(
+        key="llm.web_search_enabled",
+        label="启用网页搜索",
+        group="llm",
+        type="bool",
+        default=True,
+        description=(
+            "允许模型调用联网搜索工具（DuckDuckGo html 版，无需 API Key）；"
+            "关闭后模型只能使用系统内部的筛选与行情工具。"
+        ),
+        order=11,
+    ),
+    SettingSpec(
+        key="llm.web_search_timeout_seconds",
+        label="网页搜索超时",
+        group="llm",
+        type="int",
+        default=15,
+        minimum=3,
+        maximum=120,
+        description="单次联网搜索请求的超时时间，单位秒。",
+        order=12,
+        tags=("network",),
+    ),
+    SettingSpec(
+        key="llm.chat_mode_ttl_seconds",
+        label="聊天模式有效期",
+        group="llm",
+        type="int",
+        default=3600,
+        minimum=60,
+        maximum=604800,
+        description=(
+            "聊天模式在无新消息后自动关闭的时长，单位秒；"
+            "每次对话都会重新计时，也可发送「关闭聊天模式」立即退出。"
+        ),
+        order=12,
+    ),
+    SettingSpec(
+        key="llm.chat_per_minute",
+        label="对话每分钟次数",
+        group="llm",
+        type="int",
+        default=6,
+        minimum=1,
+        maximum=100,
+        description="单个 QQ 用户每分钟最多发起的对话请求数。",
+        order=13,
+    ),
+    SettingSpec(
+        key="llm.chat_per_day",
+        label="对话每日次数",
+        group="llm",
+        type="int",
+        default=200,
+        minimum=1,
+        maximum=10000,
+        description="单个 QQ 用户每天最多发起的对话请求数。",
+        order=14,
+    ),
+    SettingSpec(
         key="maintenance.enabled",
         label="维护模式",
         group="maintenance",
@@ -727,6 +916,14 @@ def validate_single_value(spec: SettingSpec, value: Any) -> Any:
             raise SettingsValidationError(f"{spec.key} 必须是字符串")
         if spec.key == "screening.default_conditions":
             return validate_default_conditions(value)
+        if spec.key in {"llm.base_url", "llm.model"}:
+            value = value.strip()
+        if spec.key == "llm.base_url" and value and not value.startswith(
+            ("http://", "https://")
+        ):
+            raise SettingsValidationError(
+                "llm.base_url 必须以 http:// 或 https:// 开头"
+            )
         if spec.choices is not None and value not in spec.choices:
             raise SettingsValidationError(
                 f"{spec.key} 必须是 {', '.join(spec.choices)} 之一"

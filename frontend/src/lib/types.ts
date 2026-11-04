@@ -386,6 +386,25 @@ export interface PersonalQQStatus {
   http_url: string
   ws_url: string
   self_qq: string
+  llm_enabled: boolean
+  llm_configured: boolean
+  llm_model: string
+  llm_base_url: string
+  llm_last_error: string | null
+  llm_tools_enabled: boolean
+  llm_web_search_enabled: boolean
+  chat_groups: number
+  chat_mode_ttl_seconds: number
+  chat_mode_users: PersonalQQChatMode[]
+}
+
+export interface PersonalQQChatMode {
+  group_id: string
+  group_name: string | null
+  mode: string
+  enabled_by: string
+  enabled_at: string | null
+  ttl_seconds: number
 }
 
 export interface PersonalQQGroup {

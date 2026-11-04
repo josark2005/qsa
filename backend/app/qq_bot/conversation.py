@@ -23,7 +23,22 @@ from app.screening.registry import (
     normalize_params,
     normalize_value,
 )
+from app.services.llm_chat import (
+    LLMError,
+    chat_reply,
+    clear_history,
+    llm_settings,
+)
 from app.services.personal_qq import set_personal_subscription
+from app.services.qq_chat_mode import (
+    MODE_MENTION,
+    ChatModeError,
+    disable_chat_mode,
+    get_chat_mode,
+    match_chat_command,
+    set_chat_mode,
+    touch_chat_mode,
+)
 from app.services.report_pdf import build_report_pdf
 from app.services.screen_reports import (
     create_report_snapshot,
@@ -354,12 +369,23 @@ def _session_text(session: dict[str, Any], *, max_conditions: int) -> str:
     return "\n".join(lines)
 
 
-def _help_text(platform: str = "official") -> str:
+def _help_text(
+    platform: str = "official",
+    *,
+    chat_available: bool = False,
+) -> str:
     generate_hint = (
         "确认数量后再发送「生成」获取报表链接（个人号通道暂不发送 PDF）。"
         if platform == "onebot"
         else "确认数量后再发送「生成」获取报表链接和 PDF。"
     )
+    chat_hint = ""
+    if chat_available:
+        chat_hint = (
+            "\n\n群内 @ 机器人发送「开启聊天模式」，之后 @ 机器人 直接提问"
+            "即可和模型对话；发送「关闭聊天模式」退出。"
+            "私聊可以直接提问。"
+        )
     return (
         "QSA 选股助手\n"
         "发送「筛选」开始，或直接发送条件，例如：\n"
@@ -372,7 +398,7 @@ def _help_text(platform: str = "official") -> str:
         "设置完成后发送「确认」统计数量；"
         f"{generate_hint}\n\n"
         "群内 @ 机器人并回复「订阅」，可订阅每日 16:00 选股推送；"
-        "回复「退订」可取消。"
+        f"回复「退订」可取消。{chat_hint}"
     )
 
 
@@ -491,6 +517,18 @@ def _quota_allowed(
         return False, "今日使用次数已用完。"
     return True, ""
 
+
+CHAT_MODE_ON_HINT = (
+    "已开启聊天模式。之后 @ 机器人 直接提问即可和模型对话，"
+    "也可以继续发送「筛选」使用条件筛选。发送「关闭聊天模式」退出。"
+)
+CHAT_MODE_OFF_HINT = (
+    "已关闭聊天模式。@ 机器人 发送「筛选」仍可继续使用条件筛选功能。"
+)
+CHAT_MODE_UNCONFIGURED_HINT = (
+    "LLM 对话尚未启用或未配置模型接口，"
+    "请联系管理员在系统设置「LLM 对话」中开启并填写接口地址与模型名称。"
+)
 
 SUBSCRIBE_COMMANDS = {"订阅", "订阅推送", "开启推送"}
 UNSUBSCRIBE_COMMANDS = {"取消订阅", "退订", "关闭推送"}
@@ -652,6 +690,169 @@ def _send_generation(
         client.send_text(target, f"报表生成失败：{exc}")
 
 
+def _chat_mode_reply(
+    *,
+    target: ChatTarget,
+    command: tuple[str, str],
+    client: Any,
+    settings: SettingsService,
+    redis_client: Any,
+) -> str:
+    """个人号群的聊天模式开关；返回需要回复的文本。"""
+
+    action = command[0]
+    chat_settings = llm_settings(settings.snapshot)
+    if action == "off":
+        disable_chat_mode(redis_client, target.openid)
+        clear_history(redis_client, _chat_session_key(target))
+        return CHAT_MODE_OFF_HINT
+    if not chat_settings.enabled or not chat_settings.configured:
+        return CHAT_MODE_UNCONFIGURED_HINT
+    group_name = None
+    try:
+        info = client.group_info(target.openid)
+        group_name = str(info.get("group_name") or "").strip() or None
+    except Exception:
+        logger.warning("failed to fetch QQ group name", exc_info=True)
+    try:
+        set_chat_mode(
+            redis_client,
+            target.openid,
+            mode=command[1] or MODE_MENTION,
+            enabled_by=target.actor_openid or "",
+            group_name=group_name,
+            ttl_seconds=chat_settings.chat_mode_ttl_seconds,
+        )
+    except ChatModeError as exc:
+        logger.warning("failed to enable chat mode: %s", exc)
+        return f"开启聊天模式失败：{exc}"
+    return CHAT_MODE_ON_HINT
+
+
+def _chat_session_key(target: ChatTarget) -> str:
+    """模型对话（含工具调用）历史按群 / 用户隔离。"""
+
+    if target.kind == "group":
+        return f"group:{target.openid}"
+    return f"c2c:{target.actor_openid or target.openid}"
+
+
+def _chat_quota_allowed(
+    redis_client: Any,
+    openid: str,
+    settings: SettingsService,
+) -> tuple[bool, str]:
+    """LLM 对话单独限流，避免和选股配额互相挤占。"""
+
+    snapshot = settings.snapshot
+    minute_limit = snapshot.get_int("llm.chat_per_minute")
+    day_limit = snapshot.get_int("llm.chat_per_day")
+    now = datetime.now(SHANGHAI)
+    minute_key = f"qsa:llm:quota:{openid}:{now:%Y%m%d%H%M}"
+    day_key = f"qsa:llm:quota:{openid}:{now:%Y%m%d}"
+    try:
+        minute_count = int(redis_client.incr(minute_key))
+        redis_client.expire(minute_key, 90)
+        day_count = int(redis_client.incr(day_key))
+        redis_client.expire(day_key, 90_000)
+    except Exception:
+        logger.warning("LLM quota check failed; allowing request", exc_info=True)
+        return True, ""
+    if minute_count > minute_limit:
+        return False, "对话太频繁了，请稍后再试。"
+    if day_count > day_limit:
+        return False, "今日对话次数已用完。"
+    return True, ""
+
+
+def _answer_with_llm(
+    *,
+    text: str,
+    target: ChatTarget,
+    session_factory: sessionmaker,
+    settings: SettingsService,
+    redis_client: Any,
+) -> str:
+    """把一条消息交给模型处理；失败时返回可直接展示的错误文案。"""
+
+    snapshot = settings.snapshot
+    chat_settings = llm_settings(snapshot)
+    if not chat_settings.enabled or not chat_settings.configured:
+        return CHAT_MODE_UNCONFIGURED_HINT
+    if target.kind == "group":
+        speaker = f"群友{target.actor_openid or ''}".strip()
+    else:
+        speaker = "用户"
+    try:
+        reply = chat_reply(
+            snapshot=snapshot,
+            session_factory=session_factory,
+            redis_client=redis_client,
+            session_key=_chat_session_key(target),
+            text=text,
+            speaker=speaker,
+        )
+    except LLMError as exc:
+        logger.warning("LLM chat failed: %s", exc)
+        return f"模型暂时不可用：{exc}"
+    except Exception:
+        logger.exception("LLM chat failed unexpectedly")
+        return "模型暂时不可用，请稍后再试。"
+    return reply
+
+
+def _chat_available(settings: SettingsService) -> bool:
+    """模型对话是否可用：开关打开且接口地址与模型名都配置了。"""
+
+    chat_settings = llm_settings(settings.snapshot)
+    return bool(chat_settings.enabled and chat_settings.configured)
+
+
+def _try_chat_answer(
+    *,
+    text: str,
+    target: ChatTarget,
+    client: Any,
+    session_factory: sessionmaker,
+    settings: SettingsService,
+    redis_client: Any,
+) -> bool:
+    """聊天模式下把消息交给模型；返回 True 表示已经回复，调用方无需再处理。"""
+
+    if target.platform != "onebot":
+        return False
+    if target.kind == "group":
+        state = get_chat_mode(redis_client, target.openid)
+        if state is None:
+            return False
+    if not _chat_available(settings):
+        return False
+    allowed, reason = _chat_quota_allowed(
+        redis_client, target.actor_openid or target.openid, settings
+    )
+    if not allowed:
+        client.send_text(target, reason)
+        return True
+    if target.kind == "group":
+        touch_chat_mode(
+            redis_client,
+            target.openid,
+            ttl_seconds=llm_settings(settings.snapshot).chat_mode_ttl_seconds,
+        )
+    client.send_text(target, "正在思考…")
+    client.send_text(
+        target,
+        _answer_with_llm(
+            text=text,
+            target=target,
+            session_factory=session_factory,
+            settings=settings,
+            redis_client=redis_client,
+        ),
+    )
+    return True
+
+
 def handle_message(
     payload: dict[str, Any],
     *,
@@ -756,7 +957,13 @@ def handle_message(
         text[:80],
     )
     if not text:
-        client.send_text(target, _help_text(target.platform))
+        client.send_text(
+            target,
+            _help_text(
+                target.platform,
+                chat_available=_chat_available(settings),
+            ),
+        )
         return
     key = _session_key(target)
     lock_key = f"qsa:qq:lock:{key}"
@@ -769,6 +976,27 @@ def handle_message(
         return
 
     try:
+        command = match_chat_command(text)
+        if command is not None:
+            # 聊天模式开关只对个人号群生效，@ 机器人发送即可。
+            if target.kind != "group" or not is_onebot:
+                client.send_text(
+                    target,
+                    "请在 QQ 群内 @ 机器人并发送「开启聊天模式」或「关闭聊天模式」。",
+                )
+                return
+            client.send_text(
+                target,
+                _chat_mode_reply(
+                    target=target,
+                    command=command,
+                    client=client,
+                    settings=settings,
+                    redis_client=redis_client,
+                ),
+            )
+            return
+
         session = _load_session(redis_client, key, settings)
         lowered = text.lower()
         max_conditions = snapshot.get_int("qq_bot.max_conditions")
@@ -812,7 +1040,9 @@ def handle_message(
             client.send_text(target, reply_text)
             return
         if lowered in {"帮助", "help", "?", "？"}:
-            reply = _help_text(target.platform)
+            reply = _help_text(
+                target.platform, chat_available=_chat_available(settings)
+            )
         elif lowered in {"筛选", "开始", "选股", "开始筛选"}:
             session = {
                 "logic": "and",
@@ -893,6 +1123,16 @@ def handle_message(
                 session["stage"] = "editing"
                 session["total"] = None
                 reply = ""
+        elif _try_chat_answer(
+            text=text,
+            target=target,
+            client=client,
+            session_factory=session_factory,
+            settings=settings,
+            redis_client=redis_client,
+        ):
+            # 聊天模式（个人号群）或私聊已经由模型直接回复。
+            reply = ""
         else:
             error = _apply_edit(session, text, max_conditions)
             if error:

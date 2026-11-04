@@ -8,6 +8,7 @@ import {
   Send,
   ShieldAlert,
   Trash2,
+  XCircle,
 } from "lucide-react"
 import { toast } from "sonner"
 
@@ -76,6 +77,17 @@ function numericGroupId(group: PersonalQQGroup): number {
   return Number(group.group_id)
 }
 
+function chatModeLabel(mode: string): string {
+  if (mode === "mention") return "仅 @ 触发"
+  return mode || "—"
+}
+
+function remainingTtlText(ttlSeconds: number): string {
+  if (!Number.isFinite(ttlSeconds) || ttlSeconds <= 0) return "—"
+  if (ttlSeconds < 60) return "不到 1 分钟"
+  return `约 ${Math.round(ttlSeconds / 60)} 分钟`
+}
+
 function InfoCell({
   label,
   children,
@@ -110,6 +122,8 @@ export function PersonalQQCard() {
 
   const status = statusQuery.data
   const groups = groupsQuery.data?.items ?? []
+  const chatModeUsers = status?.chat_mode_users ?? []
+  const chatGroups = status?.chat_groups ?? 0
   const connected = Boolean(status?.enabled && status?.configured && status?.connected)
   const refreshing = statusQuery.isFetching || groupsQuery.isFetching
 
@@ -138,6 +152,15 @@ export function PersonalQQCard() {
     onSuccess: () => {
       setRemoveTarget(null)
       toast.success("已移除该推送群")
+      refreshAll()
+    },
+    onError: (error) => toast.error(errorMessage(error)),
+  })
+
+  const closeChatModeMutation = useMutation({
+    mutationFn: (groupId: string) => api.closePersonalQQChatMode(groupId),
+    onSuccess: () => {
+      toast.success("已关闭该群的聊天模式")
       refreshAll()
     },
     onError: (error) => toast.error(errorMessage(error)),
@@ -251,6 +274,12 @@ export function PersonalQQCard() {
               <Badge variant="outline">
                 {groupCount(status)} 个群已订阅
               </Badge>
+              <Badge variant={status.llm_enabled ? "default" : "secondary"}>
+                {status.llm_enabled ? "LLM 对话已启用" : "LLM 对话未启用"}
+              </Badge>
+              {!status.llm_configured ? (
+                <Badge variant="destructive">模型未配置</Badge>
+              ) : null}
             </div>
             <div className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
               <InfoCell label="连接地址">
@@ -296,6 +325,28 @@ export function PersonalQQCard() {
                         : "等待协议端连接"}
                 </div>
               </InfoCell>
+              <InfoCell label="LLM 模型">
+                <div
+                  className="mt-1 truncate font-medium"
+                  title={status.llm_model || undefined}
+                >
+                  {status.llm_model || "未配置"}
+                </div>
+                <div
+                  className="truncate font-mono text-[11px] text-muted-foreground"
+                  title={status.llm_base_url || undefined}
+                >
+                  {status.llm_base_url || "—"}
+                </div>
+                {status.llm_last_error ? (
+                  <div
+                    className="mt-0.5 truncate text-[11px] text-destructive"
+                    title={status.llm_last_error}
+                  >
+                    最近错误：{status.llm_last_error}
+                  </div>
+                ) : null}
+              </InfoCell>
             </div>
             {!status.configured ? (
               <p className="text-xs text-muted-foreground">
@@ -313,6 +364,108 @@ export function PersonalQQCard() {
             ) : null}
           </>
         ) : null}
+
+        <div className="space-y-2 border-t pt-3">
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="text-sm font-medium">聊天模式</div>
+              {chatGroups > chatModeUsers.length ? (
+                <Badge variant="outline">仅显示前 20 条</Badge>
+              ) : null}
+            </div>
+            <div className="text-xs text-muted-foreground">
+              群内 @ 机器人发送「开启聊天模式」/「关闭聊天模式」切换，私聊可直接提问，超过有效期自动关闭。
+            </div>
+          </div>
+
+          {statusQuery.isError ? (
+            <Alert variant="destructive">
+              <AlertTriangle className="size-4" />
+              <AlertDescription>
+                {statusQuery.error instanceof Error
+                  ? statusQuery.error.message
+                  : "聊天模式状态加载失败"}
+              </AlertDescription>
+            </Alert>
+          ) : statusQuery.isLoading ? (
+            <Skeleton className="h-24 w-full" />
+          ) : chatModeUsers.length === 0 ? (
+            <div className="rounded-lg border border-dashed px-4 py-6 text-center text-sm text-muted-foreground">
+              当前没有群处于聊天模式
+            </div>
+          ) : (
+            <div className="overflow-hidden rounded-lg border">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>群号</TableHead>
+                    <TableHead>群名</TableHead>
+                    <TableHead>模式</TableHead>
+                    <TableHead>开启人</TableHead>
+                    <TableHead>开启时间</TableHead>
+                    <TableHead>剩余有效期</TableHead>
+                    <TableHead className="text-right">操作</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {chatModeUsers.map((user) => {
+                    const closing =
+                      closeChatModeMutation.isPending &&
+                      closeChatModeMutation.variables === user.group_id
+                    return (
+                      <TableRow key={user.group_id}>
+                        <TableCell className="font-mono text-xs">
+                          {user.group_id}
+                        </TableCell>
+                        <TableCell
+                          className="max-w-48 truncate text-xs"
+                          title={user.group_name ?? undefined}
+                        >
+                          {user.group_name || "未命名"}
+                        </TableCell>
+                        <TableCell className="whitespace-nowrap text-xs">
+                          {chatModeLabel(user.mode)}
+                        </TableCell>
+                        <TableCell
+                          className="max-w-32 truncate text-xs"
+                          title={user.enabled_by || undefined}
+                        >
+                          {user.enabled_by || "—"}
+                        </TableCell>
+                        <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                          {formatDateTime(user.enabled_at)}
+                        </TableCell>
+                        <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                          {remainingTtlText(user.ttl_seconds)}
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex items-center justify-end">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="text-destructive"
+                              onClick={() =>
+                                closeChatModeMutation.mutate(user.group_id)
+                              }
+                              disabled={closing}
+                            >
+                              {closing ? (
+                                <Loader2 className="size-3.5 animate-spin" />
+                              ) : (
+                                <XCircle className="size-3.5" />
+                              )}
+                              关闭
+                            </Button>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    )
+                  })}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+        </div>
 
         <div className="space-y-2 border-t pt-3">
           <div className="flex flex-wrap items-center justify-between gap-2">

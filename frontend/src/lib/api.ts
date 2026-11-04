@@ -307,6 +307,13 @@ export const api = {
     )
   },
 
+  closePersonalQQChatMode(groupId: string): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(
+      `/admin/personal-qq/chat-mode?group_id=${encodeURIComponent(groupId)}`,
+      { method: "DELETE" },
+    )
+  },
+
   testPersonalQQSend(groupId: number): Promise<PersonalQQTestResponse> {
     return request<PersonalQQTestResponse>("/admin/personal-qq/test", {
       method: "POST",

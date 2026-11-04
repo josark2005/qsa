@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 
 from fastapi import APIRouter, Depends
@@ -29,6 +30,12 @@ router = APIRouter(
 )
 
 LAST_ERROR_KEY = "qsa:personal_qq:last_error"
+
+# 聊天模式状态由 qq_bot 侧（个人号 OneBot 通道）写入，管理端只读/删除。
+CHAT_MODE_KEY_PREFIX = "qsa:qq:chatmode:group:"
+LLM_LAST_ERROR_KEY = "qsa:llm:last_error"
+# 聊天模式群列表最多展示 20 条，chat_groups 仍按有效键总数统计。
+CHAT_MODE_USERS_LIMIT = 20
 
 
 class PersonalGroupIn(BaseModel):
@@ -69,6 +76,77 @@ def _snapshot(container: Container):
     return container.settings_service.snapshot
 
 
+def _text(value) -> str:
+    """redis 可能返回 bytes（decode_responses=False），统一转成字符串。"""
+
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "ignore")
+    return str(value)
+
+
+def _chat_mode_payload(raw) -> dict | None:
+    """解析聊天模式 JSON；损坏或结构异常时返回 None（调用方跳过该键）。"""
+
+    text = _text(raw).strip()
+    if not text:
+        return None
+    try:
+        payload = json.loads(text)
+    except (ValueError, TypeError):
+        logger.warning("聊天模式 JSON 损坏，已跳过该键")
+        return None
+    if not isinstance(payload, dict):
+        logger.warning("聊天模式 JSON 结构异常，已跳过该键")
+        return None
+    return payload
+
+
+def _chat_mode_state(
+    container: Container, ttl_default: int
+) -> tuple[int, list[dict]]:
+    """统计处于聊天模式的群并返回展示列表；redis 异常时降级为空。"""
+
+    try:
+        keys = list(container.redis.scan_iter(match=f"{CHAT_MODE_KEY_PREFIX}*"))
+    except Exception as exc:
+        logger.warning("读取聊天模式键失败，已降级为空：%s", exc)
+        return 0, []
+
+    entries: list[dict] = []
+    for key in keys:
+        key_text = _text(key)
+        group_id = key_text[len(CHAT_MODE_KEY_PREFIX):]
+        if not group_id:
+            continue
+        try:
+            raw = container.redis.get(key)
+            ttl = int(container.redis.ttl(key))
+        except Exception as exc:
+            logger.warning("读取聊天模式键 %s 失败，已跳过：%s", key_text, exc)
+            continue
+        payload = _chat_mode_payload(raw)
+        if payload is None:
+            continue
+        # TTL <= 0 表示没有过期时间或键即将过期，回落到系统设置的有效期。
+        ttl_seconds = ttl if ttl > 0 else int(ttl_default)
+        entries.append(
+            {
+                "group_id": group_id,
+                "group_name": _text(payload.get("group_name")),
+                "mode": _text(payload.get("mode")),
+                "enabled_by": _text(payload.get("enabled_by")),
+                "enabled_at": _text(payload.get("enabled_at")),
+                "ttl_seconds": ttl_seconds,
+            }
+        )
+
+    # 键顺序来自 scan，这里按群号排序保证展示稳定。
+    entries.sort(key=lambda item: (len(item["group_id"]), item["group_id"]))
+    return len(entries), entries[:CHAT_MODE_USERS_LIMIT]
+
+
 @router.get("/status")
 def personal_qq_status(
     db: Session = Depends(get_db),
@@ -85,6 +163,12 @@ def personal_qq_status(
         )
         or 0
     )
+    llm_base_url = snapshot.get_str("llm.base_url").strip()
+    llm_model = snapshot.get_str("llm.model").strip()
+    chat_mode_ttl_seconds = snapshot.get_int("llm.chat_mode_ttl_seconds")
+    chat_groups, chat_mode_users = _chat_mode_state(
+        container, chat_mode_ttl_seconds
+    )
     return {
         "enabled": snapshot.get_bool("personal_qq.enabled"),
         "configured": bool(http_url),
@@ -96,7 +180,35 @@ def personal_qq_status(
         "http_url": http_url,
         "ws_url": ws_url,
         "self_qq": snapshot.get_str("personal_qq.self_qq").strip(),
+        # LLM 对话状态：配置来自系统设置，最近错误来自 redis。
+        "llm_enabled": snapshot.get_bool("llm.enabled"),
+        "llm_configured": bool(llm_base_url and llm_model),
+        "llm_model": llm_model,
+        "llm_base_url": llm_base_url,
+        "llm_last_error": container.redis.get(LLM_LAST_ERROR_KEY),
+        "llm_tools_enabled": snapshot.get_bool("llm.search_enabled"),
+        "llm_web_search_enabled": snapshot.get_bool("llm.web_search_enabled"),
+        "chat_groups": chat_groups,
+        "chat_mode_ttl_seconds": chat_mode_ttl_seconds,
+        "chat_mode_users": chat_mode_users,
     }
+
+
+@router.delete("/chat-mode")
+def disable_personal_chat_mode(
+    group_id: int,
+    _: None = Depends(verify_csrf),
+    container: Container = Depends(get_container),
+) -> dict:
+    """关闭某个群的聊天模式；群本来就不在聊天模式时同样返回 ok。"""
+
+    group_id = _ensure_positive(group_id)
+    try:
+        container.redis.delete(f"{CHAT_MODE_KEY_PREFIX}{group_id}")
+    except Exception as exc:
+        logger.warning("删除聊天模式失败：%s", exc)
+        raise api_error(503, "redis_unavailable", "缓存服务暂不可用") from exc
+    return {"ok": True}
 
 
 @router.get("/groups")

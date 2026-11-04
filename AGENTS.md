@@ -106,6 +106,9 @@ Linux/容器中使用 `.venv/bin/python`。Docker 相关命令在 Git Bash 下�
 - 不使用 Tushare Pro；数据源为腾讯、BaoStock、AkShare（含北交所、日历、财务、股东）。
 - 腾讯负责快速价格/增量，BaoStock 负责沪深历史与完整字段，AkShare 补充北交所等；BaoStock 可能限流/登录失败。
 - 2017 年及以前数据已做 Tencent + Sina 多源核对并固化在月度归档；2018 年之后仍有部分标的稀疏，不要假设全量完整。
+- 归档缺口的具体形态（已核实）：`data/history` 的 2018+ 月度文件基本不含沪市 **603xxx（多数）、605xxx（全部）、688xxx（全部）**，601/600 与深市 000/002/300 正常。导入后这些标的只剩「上市当年那段 + 最近几天日常增量」，例如 603289.SH 泰瑞机器只有 47 根（2017-10-31~12-29 共 44 根 + 最近 3 天），周/月线会因此出现几十个点的假跳空。归档每年行数换算后每日覆盖家数比当年上市家数少 550（2018）→1400（2024/2025），与 603/605/688 扩容节奏一致；库内日线行数与归档清单只差最近两天增量，说明导入没有丢行，缺的是归档本身。腾讯接口对这些代码有完整历史，属于当初生成归档的源库缺数据，不是行情源缺数据。
+- 补这类缺口必须用 `full_refresh=true`（界面「强制全量」）：回补逻辑按 `item_start = max(start, 最后一根日期+1)` 计算起点，而这些标的的最后一根往往是今天，不强制会直接跳过并返回成功 0 行。可走 `POST /api/admin/sync/requests`（`kind=backfill`、`symbols` 每批 ≤100 只、`rebuild_limits=false` 后再单独重算涨跌停），服务器上 BaoStock 因子可用。补完建议重新导出归档，否则重装又缺。
+- `quality` 步骤的 `coverage_ratio` 只校验目标日覆盖（5578/5578），不校验历史深度，因此历史缺口不会触发告警；排查「某只标的历史很少」时先看 `daily_bars` 的日期分布，再看归档 manifest 的每年行数。
 - 先导入已有 SQLite 归档，再考虑重新下载；不要重复抓取已有数据。
 - 回补代理在系统设置 `sync.proxy_url` 配置；腾讯/AkShare 通过 requests 环境变量生效，该设置非空时会覆盖进程内的 `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`（BaoStock 不受影响）。BaoStock 原始 TCP 需要环境变量 `BAOSTOCK_SOCKS_PROXY=socks5h://host:port`（只认环境变量，界面设置无效），由 PySocks 定向走 SOCKS5；容器内访问宿主机代理必须用 `host.docker.internal`（依赖 compose 的 `extra_hosts: host-gateway`），宿主机代理须监听 0.0.0.0 或局域网地址，容器内不要写 `127.0.0.1`（那是容器自身）。BaoStock 匿名会话不能并发：worker 回补期间不要再起 CLI 或第二个进程登录，否则旧会话被顶掉，查询返回 `10001001 用户未登录`；同一进程内已用进程锁把登录-查询-登出串行化。匿名登录握手较慢（10–40 秒），客户端登录超时 90 秒并重试一次。日报缺失日线优先走 BaoStock（同时拿到正确的后复权因子）；补数前会先用少量标的探测 BaoStock 是否已有目标日数据，没有（例如 15:00 收盘后 BaoStock 日线尚未更新）就直接转 Tencent，避免全市场空查询。BaoStock 登录失败或仍缺数据时同样用 Tencent 兜底，Tencent 兜底会继承该标的上一个已知 `adj_factor`，不再把新 K 线写成 1.0（否则会触发因子回退假跌/告警）。
 - worker 使用 PostgreSQL advisory lock 和 `sync_requests` 队列（`FOR UPDATE SKIP LOCKED`）。重启 worker 前先检查是否有 running/queued 请求。

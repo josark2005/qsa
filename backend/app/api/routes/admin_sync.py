@@ -423,6 +423,53 @@ def create_sync_request(
     return SyncRequestRead.model_validate(entry)
 
 
+def _force_cancel_stuck(
+    db: Session,
+    entry: SyncRequest,
+    container: Container,
+) -> bool:
+    """停止请求迟迟不生效时强制收敛（看门狗兜底）。
+
+    worker 只有在两次网络请求之间才会读到 cancelling，数据源卡死时可能几十分钟
+    都读不到。管理员点了停止、宽限期内后台仍未收尾（状态没变成 cancelled）时，
+    这里直接把任务标记为已停止，界面不再无限停在「停止中」。后台线程可能还在
+    收尾，所以日志里会留一条警告，运行日志可以继续观察。
+    """
+    if entry.status != "cancelling":
+        return False
+    grace = container.settings_service.snapshot.get_int(
+        "sync.cancel_grace_seconds"
+    )
+    reference = entry.updated_at or entry.started_at or entry.created_at
+    if reference is None:
+        return False
+    now = utcnow()
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=now.tzinfo)
+    if (now - reference).total_seconds() < grace:
+        return False
+    entry.status = "cancelled"
+    entry.finished_at = now
+    entry.error = f"用户停止任务（超过 {grace} 秒未收敛，已强制停止）"
+    progress = dict(entry.progress or {})
+    progress.update(
+        {
+            "phase": "cancelled",
+            "message": "已停止（强制）",
+            "cancel_forced": True,
+        }
+    )
+    entry.progress = progress
+    entry.updated_at = now
+    db.commit()
+    logger.warning(
+        "sync request %s force-cancelled after %ss of cancelling",
+        entry.id,
+        grace,
+    )
+    return True
+
+
 @router.post("/requests/{request_id}/cancel", response_model=SyncRequestRead)
 def cancel_sync_request(
     request_id: int,
@@ -430,6 +477,7 @@ def cancel_sync_request(
     actor: User = Depends(require_admin),
     _: None = Depends(verify_csrf),
     db: Session = Depends(get_db),
+    container: Container = Depends(get_container),
 ) -> SyncRequestRead:
     entry = db.get(SyncRequest, request_id)
     if entry is None:
@@ -437,6 +485,18 @@ def cancel_sync_request(
     if entry.status in {"success", "failed", "cancelled"}:
         raise api_error(409, "sync_request_finished", "任务已经结束，无法停止")
     if entry.status == "cancelling":
+        if _force_cancel_stuck(db, entry, container):
+            add_audit(
+                db,
+                actor_id=actor.id,
+                action="sync.cancel_forced",
+                target_type="sync_request",
+                target_id=str(entry.id),
+                before={"status": "cancelling"},
+                after={"status": "cancelled", "forced": True},
+                ip=get_client_ip(request),
+            )
+            db.commit()
         return SyncRequestRead.model_validate(entry)
 
     previous_status = entry.status
@@ -495,6 +555,17 @@ def list_sync_requests(
         .offset(offset)
         .limit(limit)
     ).all()
+    # 轮询列表时顺便收敛「停止中」超时的任务，用户不用再手动点一次停止。
+    if any(item.status == "cancelling" for item in items):
+        forced = [
+            item for item in items if _force_cancel_stuck(db, item, container)
+        ]
+        if forced:
+            logger.warning(
+                "force-cancelled %s stuck sync requests: %s",
+                len(forced),
+                ", ".join(str(item.id) for item in forced),
+            )
     return SyncRequestListResponse(
         items=[SyncRequestRead.model_validate(item) for item in items],
         total=total,

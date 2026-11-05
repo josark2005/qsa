@@ -103,3 +103,32 @@ def test_llm_context_window_default() -> None:
     assert validate_single_value(spec, 5000000) == 5000000
     with pytest.raises(SettingsValidationError):
         validate_single_value(spec, 5000001)
+
+
+def test_sync_stall_defaults() -> None:
+    values = default_values()
+    # 卡死/续跑/强制停止相关的四个设置：默认值即生产配置。
+    assert values["sync.stall_timeout_seconds"] == 300
+    assert values["sync.heartbeat_seconds"] == 10
+    assert values["sync.cancel_grace_seconds"] == 300
+    assert values["sync.stall_guard_seconds"] == 0
+
+
+def test_sync_stall_ranges_are_enforced() -> None:
+    # sync.stall_timeout_seconds 的 0 表示「不限制」，因此下限是 0 而不是 30。
+    cases = {
+        "sync.stall_timeout_seconds": (0, 3600, -1, 3601),
+        "sync.heartbeat_seconds": (1, 60, 0, 61),
+        "sync.cancel_grace_seconds": (30, 3600, 29, 3601),
+        "sync.stall_guard_seconds": (0, 86400, -1, 86401),
+    }
+    for key, (minimum, maximum, too_small, too_large) in cases.items():
+        spec = SETTINGS_BY_KEY[key]
+        # 全部是整数类型，界面上按秒填。
+        assert spec.type == "int", key
+        assert validate_single_value(spec, minimum) == minimum
+        assert validate_single_value(spec, maximum) == maximum
+        with pytest.raises(SettingsValidationError):
+            validate_single_value(spec, too_small)
+        with pytest.raises(SettingsValidationError):
+            validate_single_value(spec, too_large)

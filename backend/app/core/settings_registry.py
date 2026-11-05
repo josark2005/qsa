@@ -480,6 +480,65 @@ SETTING_SPECS: tuple[SettingSpec, ...] = (
         order=120,
     ),
     SettingSpec(
+        key="sync.stall_timeout_seconds",
+        label="单次请求超时",
+        group="sync",
+        type="int",
+        default=300,
+        minimum=0,
+        maximum=3600,
+        description=(
+            "单只标的的一次数据源请求（取历史/取因子）最长等待秒数。超时会断开这次"
+            "请求、记一次 stall_timeouts 并继续处理后面的标的，停在这里的标的稍后"
+            "自动补拉（断点续传）。0 表示不限制，仍会按心跳检查停止请求。"
+        ),
+        order=111,
+    ),
+    SettingSpec(
+        key="sync.heartbeat_seconds",
+        label="进度心跳间隔",
+        group="sync",
+        type="int",
+        default=10,
+        minimum=1,
+        maximum=60,
+        description=(
+            "回补过程中写一次进度心跳的间隔秒数；心跳同时用于响应「停止任务」"
+            "和判断任务是否卡死，调大后停止请求生效会变慢。"
+        ),
+        order=112,
+    ),
+    SettingSpec(
+        key="sync.cancel_grace_seconds",
+        label="强制停止宽限期",
+        group="sync",
+        type="int",
+        default=300,
+        minimum=30,
+        maximum=3600,
+        description=(
+            "点「停止任务」后等待后台收敛的秒数。超过该时间仍未结束会强制把任务"
+            "标记为已停止（progress.cancel_forced=true），后台线程可能还要一会儿才"
+            "真正退出，具体看运行日志。"
+        ),
+        order=113,
+    ),
+    SettingSpec(
+        key="sync.stall_guard_seconds",
+        label="卡死任务自动续跑",
+        group="sync",
+        type="int",
+        default=0,
+        minimum=0,
+        maximum=86400,
+        description=(
+            "运行中的回补任务若超过该秒数没有任何进度心跳，worker 会把它重新排队"
+            "自动续跑（同一任务最多 2 次）。这只是阈值的下限：实际阈值取它与"
+            "「2 倍单次请求超时 + 60 秒」中的较大值，设为 0 不会关闭续跑。"
+        ),
+        order=114,
+    ),
+    SettingSpec(
         key="sync.max_concurrent_jobs",
         label="最大并发任务数",
         group="sync",

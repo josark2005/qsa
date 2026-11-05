@@ -86,10 +86,24 @@ def run_full_backfill(
     asset_type: str = "all",
     progress_callback: ProgressCallback | None = None,
     cancel_check: Callable[[], bool] | None = None,
+    stall_timeout_seconds: Callable[[], float] | float | None = None,
+    resume_from_step: str | None = None,
 ) -> dict[str, Any]:
     run_id = uuid.uuid4()
     results: dict[str, Any] = {}
     errors: dict[str, str] = {}
+    finished_steps: list[str] = []
+    last_error: str | None = None
+    skipped_steps: list[str] = []
+    resume_from = resume_from_step if resume_from_step in FULL_STEPS else None
+    resume_index = FULL_STEPS.index(resume_from) if resume_from else len(FULL_STEPS)
+
+    def stall_timeout() -> float:
+        if stall_timeout_seconds is None:
+            return 0.0
+        if callable(stall_timeout_seconds):
+            return float(stall_timeout_seconds())
+        return float(stall_timeout_seconds)
 
     def emit(phase: str, message: str, **extra: Any) -> None:
         if progress_callback is not None:
@@ -105,8 +119,15 @@ def run_full_backfill(
         return callback
 
     def run_step(name: str, label: str, function):
+        nonlocal last_error
         if cancel_check is not None and cancel_check():
             raise SyncCancelled("用户停止任务")
+        if name in FULL_STEPS and FULL_STEPS.index(name) < resume_index:
+            # 上次任务已经跑完这一步（见 sync_runs 的 full_backfill 步骤记录），
+            # 自动续跑时直接跳过，避免几小时的前置步骤重跑。
+            skipped_steps.append(name)
+            emit(name, f"{label}（上次已完成，跳过）", percent=100)
+            return None
         emit(name, label, percent=0)
         try:
             with StepRun(
@@ -120,6 +141,7 @@ def run_full_backfill(
                 value = function()
                 rows = value.get("rows") if isinstance(value, dict) else None
                 run.finish(rows=rows, meta=value if isinstance(value, dict) else None)
+            finished_steps.append(name)
             results[name] = value
             emit(name, f"{label}完成", percent=100)
             return value
@@ -127,6 +149,7 @@ def run_full_backfill(
             raise
         except Exception as exc:
             db.rollback()
+            last_error = f"{name}: {type(exc).__name__}: {exc}"
             errors[name] = f"{type(exc).__name__}: {exc}"
             logger.exception("full backfill step failed: %s", name)
             emit(name, f"{label}失败：{exc}", percent=100)
@@ -165,6 +188,8 @@ def run_full_backfill(
                     progress_callback=step_progress(
                         "tencent_stock", "Tencent 全量价格"
                     ),
+                    cancel_check=cancel_check,
+                    stall_timeout_seconds=stall_timeout(),
                 ),
             )
         if asset_type in {"etf", "all"}:
@@ -182,6 +207,8 @@ def run_full_backfill(
                     progress_callback=step_progress(
                         "tencent_etf", "Tencent ETF 全量价格"
                     ),
+                    cancel_check=cancel_check,
+                    stall_timeout_seconds=stall_timeout(),
                 ),
             )
         if asset_type in {"stock", "all"}:
@@ -200,6 +227,8 @@ def run_full_backfill(
                     progress_callback=step_progress(
                         "baostock_stock", "BaoStock 全字段与多源核对"
                     ),
+                    cancel_check=cancel_check,
+                    stall_timeout_seconds=stall_timeout(),
                 ),
             )
             run_step(
@@ -213,6 +242,8 @@ def run_full_backfill(
                     limit=limit,
                     full_refresh=True,
                     progress_callback=step_progress("bse", "北交所行情"),
+                    cancel_check=cancel_check,
+                    stall_timeout_seconds=stall_timeout(),
                 ),
             )
         if asset_type in {"etf", "all"}:
@@ -231,6 +262,8 @@ def run_full_backfill(
                     progress_callback=step_progress(
                         "baostock_etf", "BaoStock ETF 全字段与多源核对"
                     ),
+                    cancel_check=cancel_check,
+                    stall_timeout_seconds=stall_timeout(),
                 ),
             )
         if asset_type in {"stock", "all"}:
@@ -292,6 +325,11 @@ def run_full_backfill(
                 current=f"差异 {verification['mismatched']}",
             )
 
+    stall_timeouts = sum(
+        int((value or {}).get("stall_timeouts") or 0)
+        for value in results.values()
+        if isinstance(value, dict)
+    )
     if errors:
         emit("completed", f"{len(errors)} 个步骤异常", percent=100)
     return {
@@ -299,6 +337,12 @@ def run_full_backfill(
         "start": start_date.isoformat(),
         "end": end_date.isoformat(),
         "steps": {name: name in results for name in FULL_STEPS},
+        "finished_steps": finished_steps,
+        "skipped_steps": skipped_steps,
+        "resumed": resume_from is not None,
+        "resume_from_step": resume_from,
+        "stall_timeouts": stall_timeouts,
+        "last_error": last_error,
         "verification": verification,
         "errors": errors,
     }

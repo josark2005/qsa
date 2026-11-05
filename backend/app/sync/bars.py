@@ -18,8 +18,10 @@ from app.datasources.tencent import TencentClient, TencentKlineClient
 from app.models.daily_bar import DailyBar
 from app.models.instrument import Instrument
 from app.sync.calendar import CalendarIndex
+from app.sync.cancellation import SyncCancelled
 from app.sync.db_utils import bulk_upsert
 from app.sync.quality import record_cross_source_issue
+from app.sync.watchdog import SyncStalled, bounded_call
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +153,29 @@ def compute_limit_prices(
     return _round_price(preclose * (1 + pct)), _round_price(preclose * (1 - pct))
 
 
+class _ItemStallTracker:
+    """单只标的的停顿看门狗状态。
+
+    每只标的单独计时（`bounded_call` 每次新建线程），任务级心跳由调用方的
+    progress_callback 负责；这里只在超时时计数并打日志，让循环跳过这一只而不是
+    整段卡死——超时的标的下一次回补会从它的最后一根 K 线继续（断点续传）。
+    """
+
+    def __init__(self, label: str, timeout_seconds: float) -> None:
+        self.label = label
+        self.timeout_seconds = max(0.0, float(timeout_seconds or 0))
+        self.timeouts = 0
+
+    def call(self, func):
+        if self.timeout_seconds <= 0:
+            return func()
+        try:
+            return bounded_call(func, self.timeout_seconds, label=self.label)
+        except SyncStalled:
+            self.timeouts += 1
+            raise
+
+
 def _prepare_baostock_rows(
     instrument: Instrument,
     raw: pd.DataFrame,
@@ -251,6 +276,10 @@ def backfill_baostock_bars(
     progress_every: int = 5,
     full_refresh: bool = False,
     verify_existing: bool = False,
+    cancel_check: Callable[[], bool] | None = None,
+    stall_timeout_seconds: float = 0,
+    resume_after_symbol: str | None = None,
+    full_restart: bool = False,
 ) -> dict:
     end_date = _effective_end_date(end_date)
     statement = select(Instrument).where(
@@ -267,6 +296,16 @@ def backfill_baostock_bars(
     instruments = list(db.scalars(statement).all())
 
     calendar = CalendarIndex.load(db, start=date(1990, 1, 1), end=end_date)
+    # 断点续传：上次中断在某只标的上，这次直接从它后面（symbol 排序）继续，
+    # 避免每次都从第一只重来。full_restart=True 时忽略断点，从头跑。
+    resume_after = None if full_restart else (resume_after_symbol or None)
+    if resume_after:
+        instruments = [
+            instrument
+            for instrument in instruments
+            if instrument.symbol > resume_after
+        ]
+    stalls = _ItemStallTracker(f"baostock_history:{asset_type}", stall_timeout_seconds)
     processed = 0
     rows_written = 0
     errors = 0
@@ -318,18 +357,34 @@ def backfill_baostock_bars(
             inherited_factor = _latest_factor_before(
                 db, instrument.id, item_start
             )
+            if cancel_check is not None and cancel_check():
+                raise SyncCancelled("用户停止任务")
             try:
-                raw = client.fetch_history(
-                    instrument.symbol,
-                    item_start.isoformat(),
-                    item_end.isoformat(),
-                    asset_type=asset_type,
+                raw = stalls.call(
+                    lambda: client.fetch_history(
+                        instrument.symbol,
+                        item_start.isoformat(),
+                        item_end.isoformat(),
+                        asset_type=asset_type,
+                    )
                 )
                 if raw.empty:
                     continue
-                factors = client.fetch_adjust_factors(
-                    instrument.symbol, "1990-01-01", item_end.isoformat()
-                )
+                try:
+                    factors = stalls.call(
+                        lambda: client.fetch_adjust_factors(
+                            instrument.symbol, "1990-01-01", item_end.isoformat()
+                        )
+                    )
+                except SyncStalled:
+                    # 因子只影响复权与涨跌停：先用上一根已知因子把历史落库，
+                    # 因子本身由后续 repair-adj-factors 补。
+                    errors += 1
+                    logger.warning(
+                        "BaoStock 因子请求超时，%s 先用上一根已知因子落库",
+                        instrument.symbol,
+                    )
+                    factors = pd.DataFrame()
                 rows = _prepare_baostock_rows(
                     instrument,
                     raw,
@@ -397,6 +452,14 @@ def backfill_baostock_bars(
                     )
                     processed += 1
                     db.commit()
+            except SyncStalled as exc:
+                db.rollback()
+                errors += 1
+                logger.warning(
+                    "backfill %s 卡住已跳过，稍后重试补拉：%s", instrument.symbol, exc
+                )
+            except SyncCancelled:
+                raise
             except Exception:
                 db.rollback()
                 errors += 1
@@ -431,6 +494,7 @@ def backfill_baostock_bars(
         "processed": processed,
         "rows": rows_written,
         "errors": errors,
+        "stall_timeouts": stalls.timeouts,
         "verification": verification if verify_existing else None,
     }
 
@@ -472,6 +536,9 @@ def backfill_tencent_bars(
     progress_every: int = 5,
     full_refresh: bool = False,
     include_adjust_factors: bool = True,
+    cancel_check: Callable[[], bool] | None = None,
+    stall_timeout_seconds: float = 0,
+    resume_after_symbol: str | None = None,
 ) -> dict:
     end_date = _effective_end_date(end_date)
     statement = select(Instrument).where(
@@ -488,6 +555,14 @@ def backfill_tencent_bars(
     instruments = list(db.scalars(statement).all())
 
     calendar = CalendarIndex.load(db, start=date(1990, 1, 1), end=end_date)
+    if resume_after_symbol:
+        # 断点续传：从上次卡住的那只标的后一只继续（标的按 symbol 排序）。
+        instruments = [
+            instrument
+            for instrument in instruments
+            if instrument.symbol > resume_after_symbol
+        ]
+    stalls = _ItemStallTracker(f"tencent_kline:{asset_type}", stall_timeout_seconds)
     processed = 0
     rows_written = 0
     errors = 0
@@ -553,17 +628,31 @@ def backfill_tencent_bars(
                 db, instrument.id, item_start
             )
             fetch_start = max(item_start - timedelta(days=10), date(1990, 1, 1))
+            if cancel_check is not None and cancel_check():
+                raise SyncCancelled("用户停止任务")
             try:
-                raw = client.fetch_history(
-                    instrument.symbol, fetch_start, item_end, adjust=""
+                raw = stalls.call(
+                    lambda: client.fetch_history(
+                        instrument.symbol, fetch_start, item_end, adjust=""
+                    )
                 )
                 if raw.empty:
                     continue
                 factors = pd.DataFrame()
                 if bs_client is not None:
                     try:
-                        factors = bs_client.fetch_adjust_factors(
-                            instrument.symbol, "1990-01-01", item_end.isoformat()
+                        factors = stalls.call(
+                            lambda: bs_client.fetch_adjust_factors(
+                                instrument.symbol,
+                                "1990-01-01",
+                                item_end.isoformat(),
+                            )
+                        )
+                    except SyncStalled:
+                        errors += 1
+                        logger.warning(
+                            "BaoStock 因子请求超时，%s 继承上一根已知因子",
+                            instrument.symbol,
                         )
                     except Exception:
                         logger.warning(
@@ -673,6 +762,16 @@ def backfill_tencent_bars(
                     )
                     processed += 1
                     db.commit()
+            except SyncStalled as exc:
+                db.rollback()
+                errors += 1
+                logger.warning(
+                    "Tencent 回补 %s 卡住已跳过，稍后重试补拉：%s",
+                    instrument.symbol,
+                    exc,
+                )
+            except SyncCancelled:
+                raise
             except Exception:
                 db.rollback()
                 errors += 1
@@ -706,6 +805,7 @@ def backfill_tencent_bars(
         "processed": processed,
         "rows": rows_written,
         "errors": errors,
+        "stall_timeouts": stalls.timeouts,
         "source": "tencent_kline",
     }
 
@@ -721,6 +821,8 @@ def backfill_bse_bars(
     progress_callback: ProgressCallback | None = None,
     progress_every: int = 1,
     full_refresh: bool = False,
+    cancel_check: Callable[[], bool] | None = None,
+    stall_timeout_seconds: float = 0,
 ) -> dict:
     end_date = _effective_end_date(end_date)
     statement = select(Instrument).where(
@@ -738,6 +840,7 @@ def backfill_bse_bars(
 
     calendar = CalendarIndex.load(db, start=date(1990, 1, 1), end=end_date)
     ak = AkShareClient()
+    stalls = _ItemStallTracker("akshare_bse_history", stall_timeout_seconds)
     processed = 0
     rows_written = 0
     errors = 0
@@ -783,9 +886,15 @@ def backfill_bse_bars(
         if item_start > end_date:
             continue
         inherited_factor = _latest_factor_before(db, instrument.id, item_start)
+        if cancel_check is not None and cancel_check():
+            raise SyncCancelled("用户停止任务")
         try:
-            raw = ak.fetch_bse_history(
-                instrument.code, item_start.strftime("%Y%m%d"), end_date.strftime("%Y%m%d")
+            raw = stalls.call(
+                lambda: ak.fetch_bse_history(
+                    instrument.code,
+                    item_start.strftime("%Y%m%d"),
+                    end_date.strftime("%Y%m%d"),
+                )
             )
             if raw.empty:
                 continue
@@ -855,6 +964,14 @@ def backfill_bse_bars(
                 )
                 processed += 1
                 db.commit()
+        except SyncStalled as exc:
+            db.rollback()
+            errors += 1
+            logger.warning(
+                "北交所回补 %s 卡住已跳过，稍后重试补拉：%s", instrument.symbol, exc
+            )
+        except SyncCancelled:
+            raise
         except Exception as exc:
             db.rollback()
             errors += 1
@@ -886,6 +1003,7 @@ def backfill_bse_bars(
         "processed": processed,
         "rows": rows_written,
         "errors": errors,
+        "stall_timeouts": stalls.timeouts,
     }
 
 

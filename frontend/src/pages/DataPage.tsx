@@ -11,6 +11,7 @@ import {
   RefreshCw,
   Share2,
   Square,
+  Timer,
   Users,
   Wrench,
 } from "lucide-react"
@@ -161,6 +162,7 @@ const PHASE_LABELS: Record<string, string> = {
   shareholders: "股东户数",
   quality: "质量校验",
   verification: "多源核对",
+  recovering: "自动续跑",
   completed: "完成",
   failed: "失败",
 }
@@ -212,13 +214,19 @@ function requestProgressText(request: SyncRequest): string {
   if (request.status === "queued") return "排队中"
   if (request.status === "success") return "完成"
   if (request.status === "failed") return "失败"
-  if (request.status === "cancelling") return "停止中"
-  if (request.status === "cancelled") return "已停止"
+  if (request.status === "cancelling") return "停止中（超时后自动强制停止）"
+  if (request.status === "cancelled") {
+    return request.progress?.cancel_forced ? "已停止（强制）" : "已停止"
+  }
   const progress = request.progress
   if (!progress) return "等待进度"
   const phase = PHASE_LABELS[String(progress.phase ?? "")] ?? progress.phase
   const percent = Number(progress.percent ?? 0).toFixed(1)
-  return `${phase ?? "执行"} ${percent}%`
+  const base = `${phase ?? "执行"} ${percent}%`
+  const stallSeconds = Number(progress.stall_seconds ?? 0)
+  return stallSeconds > 0
+    ? `${base} · 等待响应 ${Math.round(stallSeconds)}s`
+    : base
 }
 
 const PIPELINE_LABELS: Record<string, string> = {
@@ -345,6 +353,13 @@ function requestSummary(request: SyncRequest): string {
   const errors = result.errors as Record<string, string> | undefined
   if (errors && Object.keys(errors).length) {
     parts.push(`步骤异常 ${Object.keys(errors).length}`)
+  }
+  const stallTimeouts = Number(result.stall_timeouts ?? 0)
+  if (stallTimeouts > 0) {
+    parts.push(`超时跳过 ${stallTimeouts} 只`)
+  }
+  if (result.resumed === true) {
+    parts.push("断点续传")
   }
   return parts.length ? parts.join(" · ") : "完成"
 }
@@ -530,16 +545,29 @@ export function DataPage() {
   const lastUpdatedSeconds = activeRequest?.updated_at
     ? (Date.now() - new Date(activeRequest.updated_at).getTime()) / 1000
     : null
+  const activeProgress = activeRequest?.progress ?? null
+  const stallSeconds = Number(activeProgress?.stall_seconds ?? 0)
+  const stallTimeoutSeconds =
+    activeProgress?.stall_timeout_seconds === undefined ||
+    activeProgress?.stall_timeout_seconds === null
+      ? 300
+      : Number(activeProgress.stall_timeout_seconds)
+  const stallTimeouts = Number(activeProgress?.stall_timeouts ?? 0)
+  const stallTargetIndex =
+    Number(activeProgress?.processed ?? 0) + stallTimeouts + 1
+  const isStalled = activeRequest?.status === "running" && stallSeconds > 0
   const networkState =
-    lastUpdatedSeconds === null
-      ? "未知"
-      : lastUpdatedSeconds < 30
-        ? "活跃"
-        : lastUpdatedSeconds < 120
-          ? "更新变慢"
-          : "可能停滞"
+    isStalled
+      ? "等待数据源"
+      : lastUpdatedSeconds === null
+        ? "未知"
+        : lastUpdatedSeconds < 30
+          ? "活跃"
+          : lastUpdatedSeconds < 120
+            ? "更新变慢"
+            : "可能停滞"
   const networkBadgeVariant =
-    networkState === "活跃"
+    networkState === "活跃" || networkState === "等待数据源"
       ? "outline"
       : networkState === "可能停滞"
         ? "destructive"
@@ -870,6 +898,44 @@ export function DataPage() {
                 </div>
               </>
             )}
+            {isStalled ? (
+              <div className="space-y-1.5 rounded-lg border border-dashed bg-muted/20 px-3 py-2">
+                <div className="flex items-start gap-2 text-xs text-muted-foreground">
+                  <Timer className="mt-0.5 size-3.5 shrink-0" />
+                  <span>
+                    第 {stallTargetIndex} 只标的正等待数据源响应，已等待{" "}
+                    {Math.round(stallSeconds)} 秒
+                    {stallTimeoutSeconds > 0
+                      ? `，超过 ${stallTimeoutSeconds} 秒将断开该标的并继续后续标的，稍后自动补拉`
+                      : "（当前未设置单次请求超时），可手动停止任务"}
+                  </span>
+                </div>
+                {stallTimeouts > 0 ? (
+                  <div className="flex items-center gap-2 pl-5.5">
+                    <Badge
+                      variant={stallTimeouts >= 50 ? "destructive" : "secondary"}
+                    >
+                      已因超时跳过 {stallTimeouts} 只
+                    </Badge>
+                    <span className="text-[11px] text-muted-foreground">
+                      稍后自动续传补拉
+                    </span>
+                  </div>
+                ) : null}
+                {activeRequest.progress?.resume_after ? (
+                  <div className="pl-5.5 text-[11px] text-muted-foreground">
+                    断点续传：当前从 {activeRequest.progress.resume_after}{" "}
+                    之后继续，已写入的数据会保留
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+            {activeRequest.status === "cancelling" ? (
+              <div className="flex items-start gap-2 rounded-lg border border-dashed bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                <Timer className="mt-0.5 size-3.5 shrink-0" />
+                <span>等待后台收敛，超过宽限期会自动强制停止</span>
+              </div>
+            ) : null}
             <WorkerLogPanel
               requestId={activeRequest.id}
               running={

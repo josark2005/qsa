@@ -554,6 +554,24 @@ export interface SyncRequestProgress {
   eta_seconds?: number
   network_bytes?: number
   network_requests?: number
+  /** 当前单只标的等待数据源响应的秒数（>0 表示正在等待，超过 stall_timeout_seconds 会断开该标的继续后续标的） */
+  stall_seconds?: number
+  /** 单只标的允许等待数据源的最长秒数，超过即断开并稍后自动补拉 */
+  stall_timeout_seconds?: number
+  /** 本次任务中已因等待超时被断开的标的数量 */
+  stall_timeouts?: number
+  /** worker 最近一次心跳时间（UTC ISO），用于判断任务是否卡死 */
+  heartbeat_at?: string | null
+  /** 停止请求是否已被宽限期后的强制停止收敛 */
+  cancel_forced?: boolean
+  /** 断点续传时当前从哪只标的之后继续 */
+  resume_after?: string | null
+  /** 被 worker 判定为卡死后自动重新排队时，记录中断的那个步骤 */
+  recovered_from_step?: string
+  /** 已完成 / 待执行的步骤名，用于断点续传展示 */
+  finished_steps?: string[]
+  pending_phases?: string[]
+  resumed_steps?: string[]
 }
 
 export interface SyncRequest {

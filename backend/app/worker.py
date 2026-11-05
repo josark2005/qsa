@@ -32,12 +32,13 @@ from app.sync.bars import (
     recompute_limit_events,
 )
 from app.sync.cancellation import SyncCancelled
-from app.sync.full_backfill import MARKET_OPEN_DATE, run_full_backfill
+from app.sync.full_backfill import FULL_STEPS, MARKET_OPEN_DATE, run_full_backfill
 from app.sync.pipelines import (
     PIPELINE_NAMES,
     run_pipeline,
     today_shanghai,
 )
+from app.sync.watchdog import SyncStalled, watch_stall
 
 logger = logging.getLogger(__name__)
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -47,6 +48,11 @@ SHANGHAI = ZoneInfo("Asia/Shanghai")
 RETRYABLE_REQUEST_KINDS = frozenset({"backfill", "full_backfill", "history_import"})
 # 重试等待按不超过 1 秒的切片 sleep，保证停止请求能在一秒内生效。
 RETRY_WAIT_SLICE_SECONDS = 1.0
+# 同一次任务因为心跳过期被自动续跑的最大次数；超过就停下留给人工判断，
+# 避免在数据库锁或数据源长期不可用时无限重排队。
+MAX_AUTO_RECOVERIES = 2
+# full_backfill 的步骤名（用于判断卡死后应从哪一步继续）。
+FULL_STEP_NAMES = frozenset(FULL_STEPS)
 
 
 class SchedulerManager:
@@ -160,13 +166,26 @@ class RequestWorker:
 
     def _claim(self) -> dict | None:
         with self.session_factory() as db:
-            entry = db.scalar(
+            running_kinds = set(
+                db.scalars(
+                    select(SyncRequest.kind).where(
+                        SyncRequest.status.in_(["running", "cancelling"])
+                    )
+                ).all()
+            )
+            statement = (
                 select(SyncRequest)
                 .where(SyncRequest.status == "queued")
                 .order_by(SyncRequest.created_at.asc())
                 .with_for_update(skip_locked=True)
-                .limit(1)
+                .limit(10)
             )
+            if running_kinds:
+                # 同一个 kind 同时只允许一条在跑：过去队列里排着两条全量回补时，
+                # 第二个 worker 线程会再领一条，两个回补互相覆盖写库、BaoStock
+                # 会话互相顶掉，表现就是「卡住 + 停不下来」。
+                statement = statement.where(SyncRequest.kind.notin_(running_kinds))
+            entry = db.scalar(statement)
             if entry is None:
                 return None
             entry.status = "running"
@@ -196,6 +215,60 @@ class RequestWorker:
                 select(SyncRequest.status).where(SyncRequest.id == request_id)
             )
             return status in {"cancelling", "cancelled"}
+
+    def _setting_int(self, key: str, default: int) -> int:
+        if self.settings_service is None:
+            return default
+        try:
+            return int(self.settings_service.snapshot.get_int(key))
+        except (KeyError, TypeError, ValueError):
+            return default
+
+    def _stall_timeout(self, request_id: int) -> float:
+        """单次数据源请求允许的最长无响应时间（秒）；同步等待设置的改动。"""
+        return float(self._setting_int("sync.stall_timeout_seconds", 300))
+
+    @property
+    def heartbeat_seconds(self) -> float:
+        return float(max(1, self._setting_int("sync.heartbeat_seconds", 10)))
+
+    def _heartbeat(
+        self,
+        request_id: int,
+        seconds: float,
+        *,
+        stall_timeout: float | None = None,
+    ) -> None:
+        """写一次进度心跳；期间发现停止请求会立刻抛 SyncCancelled。
+
+        `stall_seconds` 表示「已经等了这么久还没有任何响应」，界面据此提示
+        用户「正在等待数据源，超时后会跳过并稍后续传」，而不是看起来又卡住了。
+        """
+        with self.session_factory() as db:
+            entry = db.get(SyncRequest, request_id)
+            if entry is None:
+                return
+            if entry.status in {"cancelling", "cancelled"}:
+                raise SyncCancelled("用户停止任务")
+            progress = dict(entry.progress or {})
+            progress["phase"] = progress.get("phase") or "running"
+            progress["heartbeat_at"] = utcnow().isoformat()
+            progress["stall_seconds"] = round(max(0.0, float(seconds)), 1)
+            if stall_timeout is not None:
+                progress["stall_timeout_seconds"] = int(stall_timeout)
+            progress.setdefault("stall_timeouts", 0)
+            entry.progress = progress
+            entry.updated_at = utcnow()
+            db.commit()
+
+    def _watch(self, request_id: int, stall_timeout: float | None = None):
+        """任务级看门狗：按心跳间隔轮询停止请求，同时刷新进度心跳。"""
+
+        def on_tick(seconds: float) -> None:
+            self._heartbeat(request_id, seconds, stall_timeout=stall_timeout)
+
+        interval = self.heartbeat_seconds
+        return watch_stall(0, on_tick=on_tick, interval=interval)
 
     def _sleep(self, seconds: float) -> None:
         """可注入的等待钩子；测试替换它即可避免真实 sleep。"""
@@ -269,6 +342,7 @@ class RequestWorker:
             except SyncCancelled:
                 raise
             except Exception as exc:
+                request = self._refresh_payload(request)
                 if attempt >= total_attempts:
                     raise
                 logger.warning(
@@ -320,6 +394,25 @@ class RequestWorker:
             entry.updated_at = utcnow()
             db.commit()
 
+    def _refresh_payload(self, request: dict) -> dict:
+        """重试前重新读一次 payload，拿到心跳里记下的断点续传位置。"""
+        try:
+            with self.session_factory() as db:
+                entry = db.get(SyncRequest, request["id"])
+                if entry is None:
+                    return request
+                progress = dict(entry.progress or {})
+                resume = progress.get("resume")
+                payload = dict(entry.payload or {})
+                if resume and request["kind"] == "backfill":
+                    payload["resume"] = resume
+                return {**request, "payload": payload}
+        except Exception:
+            logger.warning(
+                "failed to refresh payload for request %s", request["id"], exc_info=True
+            )
+            return request
+
     def _execute(self, request: dict) -> dict:
         payload = request["payload"]
         request_id = request["id"]
@@ -332,32 +425,34 @@ class RequestWorker:
                 if config.history_dir
                 else DEFAULT_HISTORY_DIR
             )
-            with self.session_factory() as db:
-                return import_history(
-                    db,
-                    source_dir=directory,
-                    force=bool(payload.get("force", False)),
-                    progress_callback=lambda update: self._update_progress(
-                        request_id, update
-                    ),
-                    cancel_check=lambda: self._is_cancelling(request_id),
-                )
+            with self._watch(request_id):
+                with self.session_factory() as db:
+                    return import_history(
+                        db,
+                        source_dir=directory,
+                        force=bool(payload.get("force", False)),
+                        progress_callback=lambda update: self._update_progress(
+                            request_id, update
+                        ),
+                        cancel_check=lambda: self._is_cancelling(request_id),
+                    )
         if request["kind"] == "repair_adj_factors":
             asset_type = payload.get("asset_type") or "all"
             if asset_type not in {"stock", "etf", "all"}:
                 raise ValueError(f"unsupported asset_type: {asset_type}")
             symbols = payload.get("symbols") or None
-            with self.session_factory() as db:
-                return repair_adjustment_factors(
-                    db,
-                    symbols=list(symbols) if symbols else None,
-                    asset_type=asset_type,
-                    apply=True,
-                    progress_callback=lambda update: self._update_progress(
-                        request_id, update
-                    ),
-                    cancel_check=lambda: self._is_cancelling(request_id),
-                )
+            with self._watch(request_id):
+                with self.session_factory() as db:
+                    return repair_adjustment_factors(
+                        db,
+                        symbols=list(symbols) if symbols else None,
+                        asset_type=asset_type,
+                        apply=True,
+                        progress_callback=lambda update: self._update_progress(
+                            request_id, update
+                        ),
+                        cancel_check=lambda: self._is_cancelling(request_id),
+                    )
         if request["kind"] == "pipeline":
             if not request["pipeline"]:
                 raise ValueError("pipeline request missing pipeline")
@@ -409,19 +504,25 @@ class RequestWorker:
                     {**update, "source": "full", "asset_type": asset_type},
                 )
 
-            with self.session_factory() as db:
-                return run_full_backfill(
-                    db,
-                    session_factory=self.session_factory,
-                    engine=self.engine,
-                    start_date=start,
-                    end_date=end,
-                    limit=limit,
-                    include_delisted=include_delisted,
-                    asset_type=asset_type,
-                    progress_callback=full_progress,
-                    cancel_check=lambda: self._is_cancelling(request_id),
-                )
+            with self._watch(request_id):
+                with self.session_factory() as db:
+                    return run_full_backfill(
+                        db,
+                        session_factory=self.session_factory,
+                        engine=self.engine,
+                        start_date=start,
+                        end_date=end,
+                        limit=limit,
+                        include_delisted=include_delisted,
+                        asset_type=asset_type,
+                        progress_callback=full_progress,
+                        cancel_check=lambda: self._is_cancelling(request_id),
+                        stall_timeout_seconds=self._stall_timeout(request_id),
+                        resume_from_step=(
+                            payload.get("resume_from_step")
+                            or (payload.get("resume") or {}).get("step")
+                        ),
+                    )
 
         if request["kind"] != "backfill":
             raise ValueError(f"unknown request kind: {request['kind']}")
@@ -443,68 +544,86 @@ class RequestWorker:
         rebuild_limits = bool(payload.get("rebuild_limits", True))
         full_refresh = bool(payload.get("full_refresh", False))
         symbols = payload.get("symbols") or None
+        # 断点续传：payload["resume"] = {"item": "stock", "after": "600123.SH"}
+        # 表示上一个 worker（或本次重试）在这个步骤的这只标的上中断，从这里继续。
+        resume = payload.get("resume") or {}
+        stall_timeout = self._stall_timeout(request_id)
         types = ["stock", "etf"] if asset_type == "all" else [asset_type]
         results: dict = {}
-        with self.session_factory() as db:
-            if source == "full":
-                def full_progress(update: dict) -> None:
-                    self._update_progress(
-                        request_id,
-                        {**update, "source": "full", "asset_type": asset_type},
+        with self._watch(request_id):
+            with self.session_factory() as db:
+                if source == "full":
+                    def full_progress(update: dict) -> None:
+                        self._update_progress(
+                            request_id,
+                            {**update, "source": "full", "asset_type": asset_type},
+                        )
+
+                    return run_full_backfill(
+                        db,
+                        session_factory=self.session_factory,
+                        engine=self.engine,
+                        start_date=start,
+                        end_date=end,
+                        limit=limit,
+                        include_delisted=include_delisted,
+                        asset_type=asset_type,
+                        progress_callback=full_progress,
+                        cancel_check=lambda: self._is_cancelling(request_id),
+                        stall_timeout_seconds=stall_timeout,
+                    )
+                for item in types:
+                    if self._is_cancelling(request_id):
+                        raise SyncCancelled("用户停止任务")
+                    resume_after = (
+                        resume.get("after") if resume.get("item") == item else None
                     )
 
-                return run_full_backfill(
-                    db,
-                    session_factory=self.session_factory,
-                    engine=self.engine,
-                    start_date=start,
-                    end_date=end,
-                    limit=limit,
-                    include_delisted=include_delisted,
-                    asset_type=asset_type,
-                    progress_callback=full_progress,
-                    cancel_check=lambda: self._is_cancelling(request_id),
-                )
-            for item in types:
-                if self._is_cancelling(request_id):
-                    raise SyncCancelled("用户停止任务")
-                def progress(update: dict, item: str = item) -> None:
-                    self._update_progress(
-                        request_id,
-                        {
+                    def progress(
+                        update: dict, item: str = item, resume_after=resume_after
+                    ) -> None:
+                        payload_update = {
                             **update,
                             "source": source,
                             "asset_type": item,
-                        },
-                    )
+                        }
+                        if resume_after:
+                            payload_update["resume_after"] = resume_after
+                        self._update_progress(request_id, payload_update)
 
-                if source == "tencent":
-                    payload_result = backfill_tencent_bars(
-                        db,
-                        start_date=start,
-                        end_date=end,
-                        asset_type=item,
-                        include_delisted=include_delisted,
-                        limit=limit,
-                        symbols=symbols,
-                        progress_callback=progress,
-                        progress_every=5,
-                        full_refresh=full_refresh,
-                    )
-                else:
-                    payload_result = backfill_baostock_bars(
-                        db,
-                        start_date=start,
-                        end_date=end,
-                        asset_type=item,
-                        include_delisted=include_delisted,
-                        limit=limit,
-                        symbols=symbols,
-                        progress_callback=progress,
-                        progress_every=1,
-                        full_refresh=full_refresh,
-                    )
-                results[item] = payload_result
+                    if source == "tencent":
+                        payload_result = backfill_tencent_bars(
+                            db,
+                            start_date=start,
+                            end_date=end,
+                            asset_type=item,
+                            include_delisted=include_delisted,
+                            limit=limit,
+                            symbols=symbols,
+                            progress_callback=progress,
+                            progress_every=5,
+                            full_refresh=full_refresh,
+                            cancel_check=lambda: self._is_cancelling(request_id),
+                            stall_timeout_seconds=stall_timeout,
+                            resume_after_symbol=resume_after,
+                        )
+                    else:
+                        payload_result = backfill_baostock_bars(
+                            db,
+                            start_date=start,
+                            end_date=end,
+                            asset_type=item,
+                            include_delisted=include_delisted,
+                            limit=limit,
+                            symbols=symbols,
+                            progress_callback=progress,
+                            progress_every=1,
+                            full_refresh=full_refresh,
+                            cancel_check=lambda: self._is_cancelling(request_id),
+                            stall_timeout_seconds=stall_timeout,
+                            resume_after_symbol=resume_after,
+                        )
+                    results[item] = payload_result
             if self._is_cancelling(request_id):
                 raise SyncCancelled("用户停止任务")
             if rebuild_limits:
@@ -566,9 +685,103 @@ class RequestWorker:
             result=jsonable_encoder(result),
         )
 
+    def _recover_stalled_requests(self) -> None:
+        """把心跳过期的 running 请求重新排队，实现「卡死后自动续跑」。
+
+        只处理真正「运行中」的请求：cancelling/cancelled 不动（停止是操作者
+        意图，交给强制停止宽限期收敛）；同一任务最多自动续跑
+        MAX_AUTO_RECOVERIES 次，超过后标记失败留给人工判断。
+        """
+        stall_timeout = float(self._setting_int("sync.stall_timeout_seconds", 300))
+        guard_seconds = float(self._setting_int("sync.stall_guard_seconds", 0))
+        threshold = max(guard_seconds, 2 * stall_timeout + 60 if stall_timeout else 0)
+        if threshold <= 0:
+            return
+        now = utcnow()
+        with self.session_factory() as db:
+            entries = list(
+                db.scalars(
+                    select(SyncRequest).where(SyncRequest.status == "running")
+                ).all()
+            )
+            for entry in entries:
+                progress = dict(entry.progress or {})
+                phase = str(progress.get("phase") or "")
+                if phase in {"", "completed", "failed", "cancelled", "queued"}:
+                    continue
+                heartbeat = progress.get("heartbeat_at") or entry.updated_at
+                if heartbeat is None:
+                    heartbeat = entry.started_at
+                if heartbeat is None:
+                    continue
+                if heartbeat.tzinfo is None:
+                    heartbeat = heartbeat.replace(tzinfo=now.tzinfo)
+                stalled_for = (now - heartbeat).total_seconds()
+                if stalled_for < threshold:
+                    continue
+                payload = dict(entry.payload or {})
+                recover_count = int(payload.get("recover_count") or 0)
+                if recover_count >= MAX_AUTO_RECOVERIES:
+                    entry.status = "failed"
+                    entry.finished_at = now
+                    entry.error = (
+                        f"任务在 {phase} 阶段连续 {recover_count + 1} 次超时无心跳，"
+                        "已停止自动续跑，请检查数据源与运行日志"
+                    )
+                    progress.update(
+                        {
+                            "phase": "failed",
+                            "message": "多次超时，已停止自动续跑",
+                        }
+                    )
+                    entry.progress = progress
+                    logger.error(
+                        "sync request %s stalled %s times, giving up",
+                        entry.id,
+                        recover_count + 1,
+                    )
+                    continue
+                payload["recover_count"] = recover_count + 1
+                payload["recovered"] = True
+                if phase in FULL_STEP_NAMES:
+                    if not payload.get("resume_from_step"):
+                        payload["resume_from_step"] = phase
+                elif entry.kind == "backfill" and not payload.get("resume"):
+                    # 单源回补按标的断点续传：从卡住的那只后面继续。
+                    payload["resume"] = {
+                        "item": progress.get("asset_type") or "stock",
+                        "after": progress.get("current"),
+                    }
+                progress.update(
+                    {
+                        "phase": "recovering",
+                        "message": (
+                            f"任务超过 {int(stalled_for)} 秒没有心跳，"
+                            f"自动重新排队续跑（第 {recover_count + 1} 次）"
+                        ),
+                    }
+                )
+                entry.payload = payload
+                entry.progress = progress
+                entry.status = "queued"
+                entry.started_at = None
+                entry.updated_at = now
+                logger.warning(
+                    "sync request %s stalled for %ss at step %s, requeued (%s)",
+                    entry.id,
+                    int(stalled_for),
+                    phase,
+                    recover_count + 1,
+                )
+            db.commit()
+
     def _run(self) -> None:
         logger.info("sync request worker started")
         while not self._stop.is_set():
+            try:
+                self._recover_stalled_requests()
+            except Exception:
+                logger.exception("failed to recover stalled sync requests")
             request = self._claim()
             if request is None:
                 self._stop.wait(self.poll_seconds)
@@ -595,6 +808,16 @@ class RequestWorker:
                     error="用户停止任务",
                 )
                 logger.info("sync request %s cancelled", request_id)
+            except SyncStalled as exc:
+                # 任务级看门狗在外部超时：本次执行已经没有推进，直接按失败收尾，
+                # 由 _execute_with_retries 的重试或自动续跑接着断点续传。
+                logger.warning("sync request %s stalled: %s", request_id, exc)
+                self._finish(
+                    request_id,
+                    status="failed",
+                    error=f"任务长时间无响应：{exc}",
+                    message="任务长时间无响应，稍后可重新提交续跑",
+                )
             except Exception as exc:
                 if self._is_cancelling(request_id):
                     self._finish(

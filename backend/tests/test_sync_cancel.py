@@ -117,11 +117,12 @@ def _create_cancelling_request(factory, *, age_seconds: int) -> int:
         return entry.id
 
 
-def test_cancel_stuck_request_force_cancelled_after_grace(app_fixture, container) -> None:
+def test_cancel_stuck_request_force_cancelled_after_grace(app_fixture) -> None:
     """超过 sync.cancel_grace_seconds 仍是 cancelling：接口强制置为 cancelled。"""
     login = app_fixture.login_admin()
     csrf = app_fixture.csrf_headers(login["csrf_token"])
 
+    container = app_fixture.client.app.state.container
     request_id = _create_cancelling_request(
         container.session_factory, age_seconds=600
     )
@@ -139,11 +140,12 @@ def test_cancel_stuck_request_force_cancelled_after_grace(app_fixture, container
     assert payload["progress"]["message"] == "已停止（强制）"
 
 
-def test_cancel_within_grace_keeps_cancelling(app_fixture, container) -> None:
+def test_cancel_within_grace_keeps_cancelling(app_fixture) -> None:
     """宽限期内不强制停止，界面继续显示「停止中」。"""
     login = app_fixture.login_admin()
     csrf = app_fixture.csrf_headers(login["csrf_token"])
 
+    container = app_fixture.client.app.state.container
     request_id = _create_cancelling_request(
         container.session_factory, age_seconds=1
     )
@@ -159,9 +161,10 @@ def test_cancel_within_grace_keeps_cancelling(app_fixture, container) -> None:
     assert not (payload["progress"] or {}).get("cancel_forced")
 
 
-def test_request_list_also_converges_forced_cancel(app_fixture, container) -> None:
+def test_request_list_also_converges_forced_cancel(app_fixture) -> None:
     """列表轮询时同样会顺手收敛卡住的停止请求，用户不必再点一次。"""
     login = app_fixture.login_admin()
+    container = app_fixture.client.app.state.container
     request_id = _create_cancelling_request(
         container.session_factory, age_seconds=600
     )

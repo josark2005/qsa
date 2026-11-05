@@ -95,8 +95,14 @@ def run_full_backfill(
     finished_steps: list[str] = []
     last_error: str | None = None
     skipped_steps: list[str] = []
-    resume_from = resume_from_step if resume_from_step in FULL_STEPS else None
-    resume_index = FULL_STEPS.index(resume_from) if resume_from else len(FULL_STEPS)
+    # 只有真正从中间步骤续跑时才跳过前置步骤；resume_from_step 指向第一步
+    # （或不是合法步骤名）时等价于从头跑完每一步。
+    resume_from = (
+        resume_from_step
+        if resume_from_step in FULL_STEPS and resume_from_step != FULL_STEPS[0]
+        else None
+    )
+    resume_index = FULL_STEPS.index(resume_from) if resume_from else 0
 
     def stall_timeout() -> float:
         if stall_timeout_seconds is None:
@@ -122,7 +128,11 @@ def run_full_backfill(
         nonlocal last_error
         if cancel_check is not None and cancel_check():
             raise SyncCancelled("用户停止任务")
-        if name in FULL_STEPS and FULL_STEPS.index(name) < resume_index:
+        if (
+            resume_from is not None
+            and name in FULL_STEPS
+            and FULL_STEPS.index(name) < resume_index
+        ):
             # 上次任务已经跑完这一步（见 sync_runs 的 full_backfill 步骤记录），
             # 自动续跑时直接跳过，避免几小时的前置步骤重跑。
             skipped_steps.append(name)

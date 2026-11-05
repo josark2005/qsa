@@ -303,7 +303,11 @@ def _wait_for_market_data(
 
 
 def _notify_settings(settings: SettingsService, redis_client: Any):
-    """按设置构造通知用的 QQ 客户端；未启用的通道一律返回空。"""
+    """按设置构造通知用的 QQ 客户端；未启用的通道一律返回空。
+
+    汇报推送只依赖通道配置、订阅记录与数据校验，不读取 LLM 聊天模式、
+    做梦/休眠等会话状态：机器人在群里休眠时，定时选股汇报仍照常发送。
+    """
 
     config = get_config()
     snapshot = settings.snapshot

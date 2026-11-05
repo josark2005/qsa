@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +11,7 @@ from sqlalchemy import select
 from app.core.settings_service import SettingsSnapshot
 from app.models.daily_bar import DailyBar
 from app.models.instrument import Instrument
+from app.models.personal_qq_group import PersonalQQGroup
 from app.models.qq_group_subscription import QQGroupSubscription
 from app.qq_bot.client import QQBotClient
 from app.sync import daily_report
@@ -108,6 +110,71 @@ def test_daily_report_syncs_and_notifies(app_fixture, monkeypatch, tmp_path) -> 
     assert result["notified"] is True
     assert any("每日汇报完成" in text for text in calls)
     assert "file-info" in calls
+
+
+def test_daily_report_personal_push_ignores_chat_mode(app_fixture, monkeypatch) -> None:
+    """日报推送不读取聊天模式/做梦状态：机器人休眠时仍应正常推送。
+
+    LLM 聊天模式（含做梦/休眠）只影响聊天回复，定时选股汇报始终走独立的
+    QQBotClient / OneBotClient 发送路径。
+    """
+
+    container = app_fixture.client.app.state.container
+    values = dict(container.settings_service.snapshot.values)
+    values.update(
+        {
+            "qq_bot.enabled": False,
+            "personal_qq.enabled": True,
+            "personal_qq.http_url": "http://protocol:3000",
+            "personal_qq.ws_url": "ws://protocol:3001",
+            "personal_qq.self_qq": "10001",
+            "llm.enabled": False,
+        }
+    )
+    container.settings_service._snapshot = SettingsSnapshot(values, {}, None)
+    # 模拟机器人处于聊天模式且正在做梦/休眠，这些状态不应影响日报推送。
+    container.redis.set(
+        "qsa:qq:chatmode:group:123456789",
+        json.dumps({"mode": "mention", "enabled_by": "1"}),
+    )
+    container.redis.set("qsa:llm:transcript:group:123456789", "x" * 100)
+
+    sent: list[tuple[str, str]] = []
+
+    class FakeOneBotClient:
+        configured = True
+
+        def send_text(self, target, text: str) -> None:
+            sent.append((target.openid, text))
+
+    fake_client = FakeOneBotClient()
+    monkeypatch.setattr(
+        daily_report, "build_onebot_client", lambda *args, **kwargs: fake_client
+    )
+
+    with container.session_factory() as db:
+        db.add(
+            PersonalQQGroup(
+                group_id=123456789,
+                group_name="休眠测试群",
+                active=True,
+            )
+        )
+        db.commit()
+        context = daily_report._notify_settings(
+            container.settings_service, container.redis
+        )
+        targets = daily_report.list_personal_targets(db)
+        notified = daily_report._notify_personal(
+            context["personal_client"],
+            targets,
+            "QSA 每日汇报完成（休眠测试）",
+        )
+
+    assert context["personal_client"] is fake_client
+    assert targets and targets[0].openid == "123456789"
+    assert notified is True
+    assert sent == [("123456789", "QSA 每日汇报完成（休眠测试）")]
 
 
 def test_daily_report_skips_disabled_official_bot(
